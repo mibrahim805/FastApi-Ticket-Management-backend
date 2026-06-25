@@ -1,7 +1,6 @@
 import enum
-from datetime import timezone, datetime
-from openpyxl.utils import datetime
-from pydantic import BaseModel, EmailStr, Field
+
+from pydantic import BaseModel, EmailStr
 
 
 class Role(str, enum.Enum):
@@ -9,20 +8,21 @@ class Role(str, enum.Enum):
     USER = "User"
     ADMIN = "admin"
     CUSTOMER = "customer"
-    AGENT= "agent"
+    AGENT = "agent"
+
 
 class UserRegister(BaseModel):
-    name : str
-    email : EmailStr
-    password : str
-    is_active : bool = True
-    role : str = Role.USER.value
+    name: str
+    email: EmailStr
+    password: str
+    is_active: bool = True
+    role: str = Role.USER.value
 
 
 class SuperAminRegister(BaseModel):
-    name : str
-    email : EmailStr
-    password : str
+    name: str
+    email: EmailStr
+    password: str
 
 
 class UserLogin(BaseModel):

@@ -10,11 +10,8 @@ from pydantic import BaseModel
 # - Created date
 
 
-
 class Comment(BaseModel):
     # ticket_id: str
     message: str
     visibility: str  # "public" or "internal"
     created_at: datetime = datetime.now()
-
-

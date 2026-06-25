@@ -11,7 +11,6 @@ class Priority(str, enum.Enum):
     HIGH = "high"
 
 
-
 class Status(str, enum.Enum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
@@ -43,7 +42,6 @@ class Ticket(BaseModel):
     due_date: Optional[datetime] = None
 
 
-
 class TicketCreate(BaseModel):
     board_id: str
     title: str
@@ -55,12 +53,11 @@ class TicketCreate(BaseModel):
 
 
 class TicketUpdate(BaseModel):
-    status :str
+    status: str
     priority: str
     category: str
-    assigned_to:str
+    assigned_to: str
 
 
 class AssignAgent(BaseModel):
     assigned_to: str
-

@@ -1,17 +1,21 @@
-from bson import ObjectId
-from app.api.auth import get_current_user
-from app.models.notifications import Notifications
-from app.models.ticket import TicketCreate, TicketUpdate, AssignAgent
-from fastapi import APIRouter, Depends, Query, HTTPException
-from app.db.db import ticket_collection, comments_collection, notifications_collection, boards_collection
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-import re
 
+from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.api.auth import get_current_user
+from app.db.db import (
+    boards_collection,
+    comments_collection,
+    notifications_collection,
+    ticket_collection,
+)
+from app.models.notifications import Notifications
+from app.models.ticket import AssignAgent, TicketCreate, TicketUpdate
 
 router = APIRouter()
-
-
 
 
 def calculate_due_date(priority: str) -> datetime:
@@ -26,18 +30,26 @@ def calculate_due_date(priority: str) -> datetime:
     return now + timedelta(days=sla_days[priority])
 
 
-
 @router.post("/tickets", tags=["Tickets"])
-def create_ticket(payload: TicketCreate, current_user: dict = Depends(get_current_user)):
+def create_ticket(
+    payload: TicketCreate, current_user: dict = Depends(get_current_user)
+):
     board = boards_collection.find_one({"_id": ObjectId(payload.board_id)})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    if current_user["role"] != "super_admin" and board["assigned_agent"] != str(current_user["_id"]):
-        raise HTTPException(status_code=403, detail="You can only create tickets for boards assigned to you")
-    next_number = board.get("ticket_counter",0)+1
+    if current_user["role"] != "super_admin" and board["assigned_agent"] != str(
+        current_user["_id"]
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only create tickets for boards assigned to you",
+        )
+    next_number = board.get("ticket_counter", 0) + 1
     ticket_id = f"ticket-{next_number}"
     ticket_code = f"{board.get('code', 'BOARD')}-{next_number}"
-    boards_collection.update_one({"_id": ObjectId(payload.board_id)}, {"$set": {"ticket_counter": next_number}})
+    boards_collection.update_one(
+        {"_id": ObjectId(payload.board_id)}, {"$set": {"ticket_counter": next_number}}
+    )
     ticket = {
         "board_id": str(board.get("_id")),
         "ticket_id": ticket_id,
@@ -53,14 +65,13 @@ def create_ticket(payload: TicketCreate, current_user: dict = Depends(get_curren
         "due_date": calculate_due_date(payload.priority.value),
     }
 
-
     result = ticket_collection.insert_one(ticket)
     ticket["_id"] = str(result.inserted_id)
 
     notification = Notifications(
         ticket_id=str(result.inserted_id),
         user_id=str(current_user["_id"]),
-        event_type="ticket_created"
+        event_type="ticket_created",
     )
     notification_record = notifications_collection.insert_one(notification.dict())
 
@@ -69,14 +80,17 @@ def create_ticket(payload: TicketCreate, current_user: dict = Depends(get_curren
     return ticket
 
 
-
 @router.get("/tickets/detail", tags=["Tickets"])
 def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id=None):
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(current_user["_id"]):
-        raise HTTPException(status_code=403, detail="You can only view your own tickets")
+    if current_user["role"] != "super_admin" and ticket["userId"] != str(
+        current_user["_id"]
+    ):
+        raise HTTPException(
+            status_code=403, detail="You can only view your own tickets"
+        )
     if ticket:
         ticket["_id"] = str(ticket["_id"])
     comments = list(comments_collection.find({"ticket_id": ticket_id}))
@@ -89,76 +103,96 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     }
 
 
-
 @router.put("/update_ticket/{ticket_id}", tags=["Tickets"])
-def update_ticket(ticket_id: str,data: TicketUpdate,current_user: dict = Depends(get_current_user)):
+def update_ticket(
+    ticket_id: str, data: TicketUpdate, current_user: dict = Depends(get_current_user)
+):
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
-        raise HTTPException(status_code=404,detail="Ticket not found")
-    if current_user["role"] != "super_admin"and ticket["userId"] != str(current_user["_id"]):
-        raise HTTPException(status_code=403,detail="You can only update your own tickets")
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if current_user["role"] != "super_admin" and ticket["userId"] != str(
+        current_user["_id"]
+    ):
+        raise HTTPException(
+            status_code=403, detail="You can only update your own tickets"
+        )
     update_data = data.model_dump(exclude_none=True)
     update_data["updated_by"] = str(current_user["_id"])
     update_data["updated_at"] = datetime.utcnow()
-    ticket_collection.update_one(
-        {"_id": ObjectId(ticket_id)},
-        {"$set": update_data}
-    )
+    ticket_collection.update_one({"_id": ObjectId(ticket_id)}, {"$set": update_data})
 
     notification = Notifications(
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
-        event_type="ticket_updated"
+        event_type="ticket_updated",
     )
 
     notifications_collection.insert_one(notification.model_dump())
     return {"message": "Ticket updated successfully"}
 
 
-
-@router.put("/tickets/{ticket_id}/assign", tags= ["Tickets"])
-def assign_ticket(ticket_id: str,data: AssignAgent,current_user: dict = Depends(get_current_user)):
+@router.put("/tickets/{ticket_id}/assign", tags=["Tickets"])
+def assign_ticket(
+    ticket_id: str, data: AssignAgent, current_user: dict = Depends(get_current_user)
+):
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
-        raise HTTPException(status_code=404,detail="Ticket not found")
+        raise HTTPException(status_code=404, detail="Ticket not found")
     if current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403,detail="only super admin can assign ticket")
+        raise HTTPException(
+            status_code=403, detail="only super admin can assign ticket"
+        )
 
-    if ticket.get("assignedAgent")and ticket["assignedAgent"] != data.agent_id and current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403,detail="Only super admin can reassign tickets")
+    if (
+        ticket.get("assignedAgent")
+        and ticket["assignedAgent"] != data.agent_id
+        and current_user["role"] != "super_admin"
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only super admin can reassign tickets"
+        )
     ticket_collection.update_one(
         {"_id": ObjectId(ticket_id)},
         {
             "$set": {
                 "assignedAgent": data.agent_id,
-                "updatedBy": str(current_user["_id"])
+                "updatedBy": str(current_user["_id"]),
             }
-        }
+        },
     )
 
     notification = Notifications(
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
-        event_type="ticket_assigned"
+        event_type="ticket_assigned",
     )
     notifications_collection.insert_one(notification.dict())
 
     return {"message": "Ticket assigned successfully"}
 
 
-
 @router.get("/tickets/{board_code}", tags=["Tickets"])
 def get_tickets(
-    board_code:str,
+    board_code: str,
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
-    status: Optional[str] = Query(None, description="Filter by status (e.g. open, closed, pending)"),
-    priority: Optional[str] = Query(None, description="Filter by priority (e.g. low, medium, high)"),
+    status: Optional[str] = Query(
+        None, description="Filter by status (e.g. open, closed, pending)"
+    ),
+    priority: Optional[str] = Query(
+        None, description="Filter by priority (e.g. low, medium, high)"
+    ),
     category: Optional[str] = Query(None, description="Filter by category"),
-    assigned_agent: Optional[str] = Query(None, description="Filter by assigned agent ID"),
+    assigned_agent: Optional[str] = Query(
+        None, description="Filter by assigned agent ID"
+    ),
     search: Optional[str] = Query(None, description="Search by title or ticket number"),
-    sort_by: Optional[str] = Query("created_at", regex="^(created_at|priority|due_date)$", description="Sort field"),
-    sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$", description="Sort direction"),
+    sort_by: Optional[str] = Query(
+        "created_at", regex="^(created_at|priority|due_date)$", description="Sort field"
+    ),
+    sort_order: Optional[str] = Query(
+        "desc", regex="^(asc|desc)$", description="Sort direction"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     query = {}
@@ -167,7 +201,6 @@ def get_tickets(
         raise HTTPException(status_code=404, detail="Board not found")
 
     query["board_code"] = board["code"]
-
 
     if current_user["role"] == "super_admin":
         pass
@@ -202,8 +235,7 @@ def get_tickets(
 
     total_count = ticket_collection.count_documents(query)
     cursor = (
-        ticket_collection
-        .find(query)
+        ticket_collection.find(query)
         .sort(mongo_sort_field, mongo_sort_dir)
         .skip(skip)
         .limit(limit)
@@ -236,8 +268,6 @@ def get_tickets(
             "sort_order": sort_order,
         },
     }
-
-
 
 
 @router.get("/tickets_summary", tags=["Tickets"])
@@ -273,19 +303,14 @@ def get_tickets_summary(current_user: dict = Depends(get_current_user)):
                 },
                 "low_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "low"]}, 1, 0]}
-                }
+                },
             }
         },
-        {
-            "$project": {
-                "_id": 0
-            }
-        }
+        {"$project": {"_id": 0}},
     ]
 
     summary = list(ticket_collection.aggregate(pipeline))
     return summary[0] if summary else {}
-
 
 
 @router.delete("/tickets/{ticket_id}", tags=["Tickets"])
@@ -293,15 +318,19 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(current_user["_id"]):
-        raise HTTPException(status_code=403, detail="You can only delete your own tickets")
+    if current_user["role"] != "super_admin" and ticket["userId"] != str(
+        current_user["_id"]
+    ):
+        raise HTTPException(
+            status_code=403, detail="You can only delete your own tickets"
+        )
 
     ticket_collection.delete_one({"_id": ObjectId(ticket_id)})
 
     notification = Notifications(
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
-        event_type="ticket_deleted"
+        event_type="ticket_deleted",
     )
     notifications_collection.insert_one(notification.dict())
 
