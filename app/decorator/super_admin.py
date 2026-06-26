@@ -16,6 +16,6 @@ def super_admin_required(func):
                 status_code=403, detail="Only super_admin can perform this action"
             )
 
-        return await func(*args, **kwargs)
+        return func(*args, **kwargs)
 
     return wrapper

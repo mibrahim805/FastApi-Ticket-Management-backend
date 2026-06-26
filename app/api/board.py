@@ -1,10 +1,12 @@
+from datetime import datetime, timezone
+
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
-from app.db.db import boards_collection, ticket_collection
+from app.db.db import boards_collection, statuses_collection, ticket_collection
 from app.decorator.super_admin import super_admin_required
-from app.models.board import AssignBoard, BoardCreate
+from app.models.board import AssignBoard, BoardCreate, BoardStatusAssign
 
 router = APIRouter(tags=["Boards"])
 
@@ -88,3 +90,60 @@ def delete_board(board_id: int, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Board not found")
     boards_collection.delete_one({"_id": ObjectId(board_id)})
     return {"message": "Board deleted"}
+
+
+@router.patch("/{board_id}/statuses", tags=["Boards"])
+def assign_statuses_to_board(
+    board_id: str,
+    payload: BoardStatusAssign,
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=403, detail="Only super_admin can assign statuses"
+        )
+
+    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    if len(payload.status_ids) < 2:
+        raise HTTPException(
+            status_code=400, detail="Board must have at least 2 statuses"
+        )
+
+    if len(payload.status_ids) != len(set(payload.status_ids)):
+        raise HTTPException(
+            status_code=400, detail="Duplicate status IDs are not allowed"
+        )
+
+    statuses = []
+    for sid in payload.status_ids:
+        status = statuses_collection.find_one({"_id": ObjectId(sid)})
+        if not status:
+            raise HTTPException(status_code=404, detail=f"Status '{sid}' not found")
+        statuses.append(status)
+
+    statuses.sort(key=lambda s: s["order"])
+    ordered_ids = [str(s["_id"]) for s in statuses]
+
+    boards_collection.update_one(
+        {"_id": ObjectId(board_id)},
+        {
+            "$set": {
+                "assigned_statuses": ordered_ids,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+    return {
+        "message": "Statuses assigned to board successfully",
+        "board_id": board_id,
+        "assigned_statuses": [
+            {"_id": str(s["_id"]), "name": s["name"], "order": s["order"]}
+            for s in statuses
+        ],
+        "first_status": {"_id": str(statuses[0]["_id"]), "name": statuses[0]["name"]},
+        "last_status": {"_id": str(statuses[-1]["_id"]), "name": statuses[-1]["name"]},
+    }

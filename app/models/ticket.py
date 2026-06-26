@@ -60,4 +60,4 @@ class TicketUpdate(BaseModel):
 
 
 class AssignAgent(BaseModel):
-    assigned_to: str
+    agent_id: str
