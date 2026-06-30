@@ -168,8 +168,8 @@ def assign_ticket(
         )
 
     if (
-        ticket.get("assignedAgent")
-        and ticket["assignedAgent"] != data.agent_id
+        ticket.get("assigned_agent")
+        and ticket["assigned_agent"] != data.agent_id
         and current_user["role"] != "super_admin"
     ):
         raise HTTPException(
@@ -179,8 +179,8 @@ def assign_ticket(
         {"_id": ObjectId(ticket_id)},
         {
             "$set": {
-                "assignedAgent": data.agent_id,
-                "updatedBy": str(current_user["_id"]),
+                "assigned_agent": data.agent_id,
+                "updated_by": str(current_user["_id"]),
             }
         },
     )
@@ -237,7 +237,7 @@ def get_tickets(
     if category:
         query["category"] = category
     if assigned_agent:
-        query["assignedAgent"] = assigned_agent
+        query["assigned_agent"] = assigned_agent
 
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)

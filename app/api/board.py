@@ -63,8 +63,8 @@ def assign_board(
         raise HTTPException(status_code=404, detail="Board not found")
 
     if (
-        board.get("assignedAgent")
-        and board["assignedAgent"] != data.agent_id
+        board.get("assigned_agent")
+        and board["assigned_agent"] != data.agent_id
         and current_user["role"] != "super_admin"
     ):
         raise HTTPException(
