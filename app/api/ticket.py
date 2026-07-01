@@ -5,6 +5,7 @@ from typing import Optional
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.db.db import (
     boards_collection,
@@ -92,9 +93,14 @@ def create_ticket(
 
     result = ticket_collection.insert_one(ticket)
     ticket["_id"] = str(result.inserted_id)
+    log_activity(
+        ticket_id=ticket["_id"],
+        action="ticket_created",
+        changed_by=current_user["_id"],
+    )
 
     notification = Notifications(
-        ticket_id=str(result.inserted_id),
+        ticket_id=ticket["_id"],
         user_id=str(current_user["_id"]),
         event_type="ticket_created",
     )
@@ -152,6 +158,35 @@ def update_ticket(
     )
 
     notifications_collection.insert_one(notification.model_dump())
+    new_ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    TRACKED_FIELDS = [
+        "title",
+        "description",
+        "priority",
+        "status",
+        "category",
+        "assigned_to",
+        "due_date",
+    ]
+
+    changes = []
+
+    for field in TRACKED_FIELDS:
+        if ticket.get(field) != new_ticket.get(field):
+            changes.append(
+                {
+                    "field": field,
+                    "old_value": ticket.get(field),
+                    "new_value": new_ticket.get(field),
+                }
+            )
+    if changes:
+        log_activity(
+            ticket_id=ticket_id,
+            action="ticket_updated",
+            changed_by=current_user["_id"],
+            changes=changes,
+        )
     return {"message": "Ticket updated successfully"}
 
 
