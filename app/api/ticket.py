@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.activity import log_activity
@@ -13,11 +14,19 @@ from app.db.db import (
     notifications_collection,
     statuses_collection,
     ticket_collection,
+    user_collection,
 )
 from app.models.notifications import Notifications
 from app.models.ticket import AssignAgent, TicketCreate, TicketUpdate
 
 router = APIRouter()
+
+
+def _parse_object_id(value: str, field_name: str) -> ObjectId:
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
 
 
 def calculate_due_date(priority: str) -> datetime:
@@ -38,7 +47,9 @@ def create_ticket(
     current_user: dict = Depends(get_current_user),
 ):
 
-    board = boards_collection.find_one({"_id": ObjectId(payload.board_id)})
+    board = boards_collection.find_one(
+        {"_id": _parse_object_id(payload.board_id, "board_id")}
+    )
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
@@ -58,7 +69,9 @@ def create_ticket(
         )
 
     first_status_id = assigned_statuses[0]
-    first_status = statuses_collection.find_one({"_id": ObjectId(first_status_id)})
+    first_status = statuses_collection.find_one(
+        {"_id": _parse_object_id(first_status_id, "status_id")}
+    )
     if not first_status:
         raise HTTPException(
             status_code=400,
@@ -69,7 +82,7 @@ def create_ticket(
     ticket_code = f"{board.get('code', 'BOARD')}-{next_number}"
 
     boards_collection.update_one(
-        {"_id": ObjectId(payload.board_id)},
+        {"_id": _parse_object_id(payload.board_id, "board_id")},
         {"$set": {"ticket_counter": next_number}},
     )
 
@@ -112,7 +125,9 @@ def create_ticket(
 
 @router.get("/tickets/detail", tags=["Tickets"])
 def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id=None):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if current_user["role"] != "super_admin" and ticket["userId"] != str(
@@ -137,7 +152,9 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
 def update_ticket(
     ticket_id: str, data: TicketUpdate, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if current_user["role"] != "super_admin" and ticket["userId"] != str(
@@ -149,7 +166,9 @@ def update_ticket(
     update_data = data.model_dump(exclude_none=True)
     update_data["updated_by"] = str(current_user["_id"])
     update_data["updated_at"] = datetime.utcnow()
-    ticket_collection.update_one({"_id": ObjectId(ticket_id)}, {"$set": update_data})
+    ticket_collection.update_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
+    )
 
     notification = Notifications(
         ticket_id=ticket_id,
@@ -158,7 +177,9 @@ def update_ticket(
     )
 
     notifications_collection.insert_one(notification.model_dump())
-    new_ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    new_ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
     TRACKED_FIELDS = [
         "title",
         "description",
@@ -194,7 +215,9 @@ def update_ticket(
 def assign_ticket(
     ticket_id: str, data: AssignAgent, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if current_user["role"] != "super_admin":
@@ -202,16 +225,16 @@ def assign_ticket(
             status_code=403, detail="only super admin can assign ticket"
         )
 
-    if (
-        ticket.get("assigned_agent")
-        and ticket["assigned_agent"] != data.agent_id
-        and current_user["role"] != "super_admin"
-    ):
-        raise HTTPException(
-            status_code=403, detail="Only super admin can reassign tickets"
-        )
+    agent_object_id = _parse_object_id(data.agent_id, "agent_id")
+    agent = user_collection.find_one({"_id": agent_object_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.get("role") != "agent":
+        raise HTTPException(status_code=400, detail="Target user is not an agent")
+    if ticket.get("assigned_agent"):
+        raise HTTPException(status_code=400, detail="Ticket is already assigned")
     ticket_collection.update_one(
-        {"_id": ObjectId(ticket_id)},
+        {"_id": _parse_object_id(ticket_id, "ticket_id")},
         {
             "$set": {
                 "assigned_agent": data.agent_id,
@@ -401,7 +424,11 @@ def move_ticket_forward(
     ticket_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
     if current_user["role"] != "super_admin" and ticket["userId"] != str(
         current_user["_id"]
     ):
@@ -409,10 +436,9 @@ def move_ticket_forward(
             status_code=403, detail="Only agents or admins can move tickets"
         )
 
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-
-    board = boards_collection.find_one({"_id": ObjectId(ticket["board_id"])})
+    board = boards_collection.find_one(
+        {"_id": _parse_object_id(ticket["board_id"], "board_id")}
+    )
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
@@ -440,7 +466,9 @@ def move_ticket_forward(
         )
 
     next_status_id = assigned_statuses[current_index + 1]
-    next_status = statuses_collection.find_one({"_id": ObjectId(next_status_id)})
+    next_status = statuses_collection.find_one(
+        {"_id": _parse_object_id(next_status_id, "status_id")}
+    )
     if not next_status:
         raise HTTPException(status_code=404, detail="Next status not found")
 
@@ -458,7 +486,7 @@ def move_ticket_forward(
         update_fields["resolved_date"] = now
 
     ticket_collection.update_one(
-        {"_id": ObjectId(ticket_id)},
+        {"_id": _parse_object_id(ticket_id, "ticket_id")},
         {"$set": update_fields},
     )
 

@@ -44,9 +44,14 @@ def register_super_admin(user: SuperAminRegister):
 def register(user: UserRegister, current_user: dict = Depends(get_current_user)):
     existing_email = user_collection.find_one({"email": user.email})
     allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
+    valid_roles = {role.value for role in Role}
 
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
+    if not current_user:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    if user.role not in valid_roles:
+        raise HTTPException(status_code=400, detail="Invalid role")
     if current_user["role"] != Role.SUPER_ADMIN.value:
         if (
             current_user["role"] == Role.ADMIN.value

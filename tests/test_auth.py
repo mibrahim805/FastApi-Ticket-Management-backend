@@ -38,6 +38,141 @@ def test_register_blocks_agent_from_creating_admin_roles(monkeypatch, fake_colle
     assert exc_info.value.status_code == 403
 
 
+def test_register_rejects_second_super_admin(monkeypatch, fake_collection):
+    fake_collection.documents.append({"role": "super_admin"})
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    response = registration.register_super_admin(
+        SuperAminRegister(
+            name="Second",
+            email="second@example.com",
+            password="secret",
+        )
+    )
+
+    assert response == {"message": "An super admin already exists."}
+    assert len(fake_collection.documents) == 1
+
+
+def test_register_rejects_duplicate_email(monkeypatch, fake_collection):
+    fake_collection.documents.append({"email": "taken@example.com"})
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    payload = UserRegister(
+        name="User",
+        email="taken@example.com",
+        password="secret",
+        role=Role.USER.value,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register(payload, current_user={"role": Role.SUPER_ADMIN.value})
+
+    assert exc_info.value.status_code == 400
+
+
+def test_register_rejects_customer_creating_user(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+    monkeypatch.setattr(registration, "hash_password", lambda value: f"hashed:{value}")
+
+    payload = UserRegister(
+        name="User",
+        email="user@example.com",
+        password="secret",
+        role=Role.USER.value,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register(payload, current_user={"role": Role.CUSTOMER.value})
+
+    assert exc_info.value.status_code == 403
+
+
+def test_register_succeeds_for_super_admin(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+    monkeypatch.setattr(registration, "hash_password", lambda value: f"hashed:{value}")
+
+    payload = UserRegister(
+        name="User",
+        email="user@example.com",
+        password="secret",
+        role=Role.USER.value,
+    )
+
+    response = registration.register(
+        payload, current_user={"role": Role.SUPER_ADMIN.value}
+    )
+
+    assert response == {"message": "User registered successfully"}
+    assert fake_collection.documents[0]["role"] == Role.USER.value
+
+
+def test_register_succeeds_for_admin(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+    monkeypatch.setattr(registration, "hash_password", lambda value: f"hashed:{value}")
+
+    payload = UserRegister(
+        name="Customer",
+        email="customer@example.com",
+        password="secret",
+        role=Role.CUSTOMER.value,
+    )
+
+    response = registration.register(payload, current_user={"role": Role.ADMIN.value})
+
+    assert response == {"message": "User registered successfully"}
+    assert fake_collection.documents[0]["role"] == Role.CUSTOMER.value
+
+
+def test_register_succeeds_for_agent_allowed_role(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+    monkeypatch.setattr(registration, "hash_password", lambda value: f"hashed:{value}")
+
+    payload = UserRegister(
+        name="Customer",
+        email="customer@example.com",
+        password="secret",
+        role=Role.CUSTOMER.value,
+    )
+
+    response = registration.register(payload, current_user={"role": Role.AGENT.value})
+
+    assert response == {"message": "User registered successfully"}
+    assert fake_collection.documents[0]["role"] == Role.CUSTOMER.value
+
+
+def test_register_rejects_invalid_role(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    payload = UserRegister(
+        name="User",
+        email="user@example.com",
+        password="secret",
+        role="invalid-role",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register(payload, current_user={"role": Role.SUPER_ADMIN.value})
+
+    assert exc_info.value.status_code == 400
+
+
+def test_register_rejects_missing_current_user(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    payload = UserRegister(
+        name="User",
+        email="user@example.com",
+        password="secret",
+        role=Role.USER.value,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register(payload, current_user=None)
+
+    assert exc_info.value.status_code == 401
+
+
 def test_login_returns_token_for_valid_user(monkeypatch, fake_collection):
     user_id = ObjectId()
     fake_collection.documents.append(
@@ -77,5 +212,32 @@ def test_login_rejects_inactive_user(monkeypatch, fake_collection):
 
     with pytest.raises(HTTPException) as exc_info:
         registration.login(UserLogin(email="user@example.com", password="secret"))
+
+    assert exc_info.value.status_code == 401
+
+
+def test_login_rejects_wrong_password(monkeypatch, fake_collection):
+    fake_collection.documents.append(
+        {
+            "_id": ObjectId(),
+            "email": "user@example.com",
+            "hashed_password": "hashed",
+            "is_active": True,
+        }
+    )
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+    monkeypatch.setattr(registration, "verify_password", lambda raw, hashed: False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.login(UserLogin(email="user@example.com", password="wrong"))
+
+    assert exc_info.value.status_code == 401
+
+
+def test_login_rejects_unknown_email(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.login(UserLogin(email="missing@example.com", password="secret"))
 
     assert exc_info.value.status_code == 401
