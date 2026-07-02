@@ -158,8 +158,8 @@ def test_board_get_update_delete(monkeypatch, fake_collection):
     gb = asyncio.run(board_mod.get_boards(current_user={"role": "super_admin"}))
     assert "boards" in gb
 
-    # get_board not found (current code checks assigned_agent first causing TypeError)
-    with pytest.raises(TypeError):
+    # get_board not found
+    with pytest.raises(HTTPException):
         asyncio.run(
             board_mod.get_board(
                 str(ObjectId()), current_user={"_id": ObjectId(), "role": "super_admin"}
@@ -186,9 +186,13 @@ def test_board_get_update_delete(monkeypatch, fake_collection):
             )
         )
 
-    # delete not found (invalid id type — code calls ObjectId on int)
-    with pytest.raises(TypeError):
-        asyncio.run(board_mod.delete_board(12345, current_user={"role": "super_admin"}))
+    # delete not found
+    with pytest.raises(HTTPException):
+        asyncio.run(
+            board_mod.delete_board(
+                str(ObjectId()), current_user={"role": "super_admin"}
+            )
+        )
 
 
 def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):

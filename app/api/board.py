@@ -33,10 +33,10 @@ def get_boards(current_user: dict = Depends(get_current_user)):
 @super_admin_required
 def get_board(board_id: str, current_user: dict = Depends(get_current_user)):
     board = boards_collection.find_one({"_id": ObjectId(board_id)})
-    if board["assigned_agent"] != str(current_user["_id"]):
-        raise HTTPException(status_code=403, detail="you can view only your own boards")
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+    if board.get("assigned_agent") != str(current_user["_id"]):
+        raise HTTPException(status_code=403, detail="you can view only your own boards")
     board["_id"] = str(board["_id"])
     return {"board": board}
 

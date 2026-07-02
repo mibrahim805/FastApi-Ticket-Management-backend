@@ -1,9 +1,40 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
 from app.api import ticket
+from app.api.ticket import calculate_due_date
 from app.models.ticket import AssignAgent, Category, Priority, TicketCreate
+
+
+@pytest.mark.parametrize(
+    "priority, days",
+    [
+        ("high", 1),
+        ("medium", 3),
+        ("low", 7),
+    ],
+)
+def test_calculate_due_date(monkeypatch, priority, days):
+    fixed_time = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_time
+
+    monkeypatch.setattr("app.api.ticket.datetime", FakeDateTime)
+
+    due_date = calculate_due_date(priority)
+
+    assert due_date == fixed_time + timedelta(days=days)
+
+
+def test_calculate_due_date_invalid_priority():
+    with pytest.raises(KeyError):
+        calculate_due_date("invalid")
 
 
 def test_create_ticket_assigns_first_status_and_updates_counter(

@@ -93,3 +93,35 @@ class FakeCollection:
 @pytest.fixture
 def fake_collection():
     return FakeCollection()
+
+
+def test_matches_returns_false_when_no_or_clause_matches():
+    document = {
+        "role": "agent",
+        "name": "Ibrahim",
+    }
+
+    query = {
+        "$or": [
+            {"role": "admin"},
+            {"name": "Ali"},
+        ]
+    }
+
+    assert _matches(document, query) is False
+
+
+def test_matches_returns_true_when_one_or_clause_matches():
+    document = {
+        "role": "agent",
+        "name": "Ibrahim",
+    }
+
+    query = {
+        "$or": [
+            {"role": "admin"},
+            {"role": "agent"},
+        ]
+    }
+
+    assert _matches(document, query) is True
