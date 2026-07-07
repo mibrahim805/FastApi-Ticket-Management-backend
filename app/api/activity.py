@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
+from app.api.auth import get_current_user
 from app.db.db import ticket_activity_collection, ticket_collection
 
 router = APIRouter(prefix="/activities", tags=["Activity"])
@@ -29,7 +30,7 @@ def log_activity(
 
 
 @router.get("/tickets/{ticket_id}")
-def get_ticket_activity(ticket_id: str):
+def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user())):
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")

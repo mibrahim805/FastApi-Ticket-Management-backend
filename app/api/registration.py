@@ -185,7 +185,8 @@ def reset_password(token: str, new_password: str):
     hashed_password = hash_password(new_password)
 
     user_collection.update_one(
-        {"_id": record["user_id"]}, {"$set": {"password": hashed_password}}
+        {"_id": ObjectId(record["user_id"])},
+        {"$set": {"hashed_password": hashed_password}},
     )
     reset_tokens_collection.update_one({"token": token}, {"$set": {"used": True}})
 

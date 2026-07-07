@@ -109,6 +109,7 @@ def create_ticket(
     log_activity(
         ticket_id=ticket["_id"],
         action="ticket_created",
+        changes=[],
         changed_by=current_user["_id"],
     )
 

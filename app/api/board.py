@@ -35,6 +35,8 @@ def get_board(board_id: str, current_user: dict = Depends(get_current_user)):
     board = boards_collection.find_one({"_id": ObjectId(board_id)})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+    if current_user["role"] != "super_admin":
+        return {"message": "Only super admin can view board"}
     if board.get("assigned_agent") != str(current_user["_id"]):
         raise HTTPException(status_code=403, detail="you can view only your own boards")
     board["_id"] = str(board["_id"])
@@ -84,7 +86,7 @@ def assign_board(
 
 @router.delete("/boards/{board_id}")
 @super_admin_required
-def delete_board(board_id: int, current_user: dict = Depends(get_current_user)):
+def delete_board(board_id: str, current_user: dict = Depends(get_current_user)):
     board = boards_collection.find_one({"_id": ObjectId(board_id)})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
