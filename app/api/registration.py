@@ -41,34 +41,22 @@ def register_super_admin(user: SuperAminRegister):
 
 
 @router.post("/register", tags=["Auth"])
-def register(user: UserRegister, current_user: dict = Depends(get_current_user)):
+def register(user: UserRegister):
     existing_email = user_collection.find_one({"email": user.email})
     allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
     valid_roles = {role.value for role in Role}
 
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
-    if not current_user:
-        raise HTTPException(status_code=401, detail="User not authenticated")
+
     if user.role not in valid_roles:
         raise HTTPException(status_code=400, detail="Invalid role")
-    if current_user["role"] != Role.SUPER_ADMIN.value:
-        if (
-            current_user["role"] == Role.ADMIN.value
-            and user.role == Role.SUPER_ADMIN.value
-        ):
-            raise HTTPException(
-                status_code=403, detail="admin cannot register a super admin"
-            )
-        if current_user["role"] == Role.AGENT.value and user.role in allowed_users:
-            raise HTTPException(
-                status_code=403,
-                detail="agent cannot register admin or agent users or super admin",
-            )
-        if current_user["role"] == Role.CUSTOMER.value:
-            raise HTTPException(
-                status_code=403, detail="customer cannot register a user"
-            )
+
+    if user.role in allowed_users:
+        raise HTTPException(
+            status_code=403,
+            detail=" Only super admin can register an admin or agent",
+        )
 
     hashed_password = hash_password(user.password)
     user_data = {

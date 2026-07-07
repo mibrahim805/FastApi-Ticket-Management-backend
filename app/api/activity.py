@@ -30,7 +30,7 @@ def log_activity(
 
 
 @router.get("/tickets/{ticket_id}")
-def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user())):
+def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user)):
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")

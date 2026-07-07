@@ -11,6 +11,7 @@ from app.api.auth import get_current_user
 from app.db.db import (
     boards_collection,
     comments_collection,
+    counters_collection,
     notifications_collection,
     statuses_collection,
     ticket_collection,
@@ -32,13 +33,16 @@ def _parse_object_id(value: str, field_name: str) -> ObjectId:
 def calculate_due_date(priority: str) -> datetime:
     now = datetime.now(timezone.utc)
 
-    sla_days = {
-        "high": 1,
-        "medium": 3,
-        "low": 7,
+    sla_windows = {
+        "urgent": timedelta(hours=4),
+        "high": timedelta(days=1),
+        "medium": timedelta(days=3),
+        "low": timedelta(days=7),
     }
-
-    return now + timedelta(days=sla_days[priority])
+    try:
+        return now + sla_windows[priority.lower()]
+    except KeyError:
+        raise ValueError(f"Invalid priority: {priority}")
 
 
 @router.post("/", tags=["Tickets"])
@@ -52,14 +56,6 @@ def create_ticket(
     )
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-
-    if current_user["role"] != "super_admin" and board["assigned_agent"] != str(
-        current_user["_id"]
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only create tickets for boards assigned to you",
-        )
 
     assigned_statuses = board.get("assigned_statuses", [])
     if not assigned_statuses:
@@ -78,13 +74,14 @@ def create_ticket(
             detail="Board's first status not found. Contact admin.",
         )
 
-    next_number = board.get("ticket_counter", 0) + 1
-    ticket_code = f"{board.get('code', 'BOARD')}-{next_number}"
+    next_number = counters_collection.find_one_and_update(
+        {"_id": "ticket_counter"},
+        {"$inc": {"counter": 1}},
+        upsert=True,
+        return_document=True,
+    )["counter"]
 
-    boards_collection.update_one(
-        {"_id": _parse_object_id(payload.board_id, "board_id")},
-        {"$set": {"ticket_counter": next_number}},
-    )
+    ticket_code = f"TKT-{next_number}"
 
     ticket = {
         "board_id": str(board["_id"]),
@@ -164,6 +161,15 @@ def update_ticket(
         raise HTTPException(
             status_code=403, detail="You can only update your own tickets"
         )
+
+    # Validate: ticket must be assigned before moving to IN_PROGRESS
+    if data.status and data.status.lower() == "in_progress":
+        if not ticket.get("assigned_agent"):
+            raise HTTPException(
+                status_code=400,
+                detail=("Ticket must be assigned before moving to IN_PROGRESS"),
+            )
+
     update_data = data.model_dump(exclude_none=True)
     update_data["updated_by"] = str(current_user["_id"])
     update_data["updated_at"] = datetime.utcnow()
@@ -221,10 +227,6 @@ def assign_ticket(
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="only super admin can assign ticket"
-        )
 
     agent_object_id = _parse_object_id(data.agent_id, "agent_id")
     agent = user_collection.find_one({"_id": agent_object_id})
@@ -232,8 +234,18 @@ def assign_ticket(
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.get("role") != "agent":
         raise HTTPException(status_code=400, detail="Target user is not an agent")
-    if ticket.get("assigned_agent"):
-        raise HTTPException(status_code=400, detail="Ticket is already assigned")
+
+    # Allow self-assignment by agents or reassignment by admins
+    is_self_assign = (
+        str(current_user["_id"]) == data.agent_id and current_user["role"] == "agent"
+    )
+    is_admin_assign = current_user["role"] in ["super_admin", "admin"]
+
+    if not (is_self_assign or is_admin_assign):
+        raise HTTPException(
+            status_code=403, detail="Only admins can assign, or agents can self-assign"
+        )
+
     ticket_collection.update_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")},
         {
@@ -270,11 +282,16 @@ def get_tickets(
         None, description="Filter by assigned agent ID"
     ),
     search: Optional[str] = Query(None, description="Search by title or ticket number"),
+    overdue_only: Optional[bool] = Query(
+        None, description="Filter to show only overdue tickets"
+    ),
     sort_by: Optional[str] = Query(
-        "created_at", regex="^(created_at|priority|due_date)$", description="Sort field"
+        "created_at",
+        pattern="^(created_at|priority|due_date)$",
+        description="Sort field",
     ),
     sort_order: Optional[str] = Query(
-        "desc", regex="^(asc|desc)$", description="Sort direction"
+        "desc", pattern="^(asc|desc)$", description="Sort direction"
     ),
     current_user: dict = Depends(get_current_user),
 ):
@@ -298,19 +315,27 @@ def get_tickets(
     if assigned_agent:
         query["assigned_agent"] = assigned_agent
 
+    if overdue_only:
+        query["$expr"] = {
+            "$and": [
+                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
+                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
+            ]
+        }
+
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)
         query["$or"] = [
             {"title": {"$regex": search_regex}},
-            {"ticketNumber": {"$regex": search_regex}},
+            {"ticket_code": {"$regex": search_regex}},
         ]
 
     SORT_FIELD_MAP = {
-        "created_at": "createdAt",
-        "priority": "priorityOrder",
-        "due_date": "dueDate",
+        "created_at": "created_date",
+        "priority": "priority",
+        "due_date": "due_date",
     }
-    mongo_sort_field = SORT_FIELD_MAP.get(sort_by, "createdAt")
+    mongo_sort_field = SORT_FIELD_MAP.get(sort_by, "created_date")
     mongo_sort_dir = 1 if sort_order == "asc" else -1
 
     skip = (page - 1) * page_size
@@ -325,8 +350,17 @@ def get_tickets(
     )
 
     tickets = []
+    now = datetime.now(timezone.utc)
     for ticket in cursor:
         ticket["_id"] = str(ticket["_id"])
+        # Add computed overdue field
+        if ticket.get("due_date") and ticket.get("current_status_name") not in [
+            "resolved",
+            "closed",
+        ]:
+            ticket["is_overdue"] = ticket["due_date"] < now
+        else:
+            ticket["is_overdue"] = False
         tickets.append(ticket)
 
     total_pages = (total_count + page_size - 1) // page_size
@@ -496,5 +530,63 @@ def move_ticket_forward(
         "ticket_code": ticket["ticket_code"],
         "previous_status": ticket["current_status_name"],
         "current_status": next_status["name"],
+        "updated_at": now,
+    }
+
+
+@router.put("/tickets/{ticket_id}/reopen", tags=["Tickets"])
+def reopen_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
+    ticket = ticket_collection.find_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")}
+    )
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if current_user["role"] not in ["super_admin", "admin"]:
+        raise HTTPException(status_code=403, detail="Only admins can reopen tickets")
+
+    if ticket.get("current_status_name") not in ["closed", "resolved"]:
+        raise HTTPException(
+            status_code=400, detail="Only closed or resolved tickets can be reopened"
+        )
+
+    now = datetime.now(timezone.utc)
+    ticket_collection.update_one(
+        {"_id": _parse_object_id(ticket_id, "ticket_id")},
+        {
+            "$set": {
+                "current_status_name": "reopened",
+                "updated_by": str(current_user["_id"]),
+                "updated_at": now,
+                "closed_date": None,
+            }
+        },
+    )
+
+    notification = Notifications(
+        ticket_id=ticket_id,
+        user_id=str(current_user["_id"]),
+        event_type="ticket_reopened",
+    )
+    notifications_collection.insert_one(notification.dict())
+
+    log_activity(
+        ticket_id=ticket_id,
+        action="ticket_reopened",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "status",
+                "old_value": ticket.get("current_status_name"),
+                "new_value": "reopened",
+            }
+        ],
+    )
+
+    return {
+        "ticket_id": ticket_id,
+        "ticket_code": ticket["ticket_code"],
+        "previous_status": ticket.get("current_status_name"),
+        "current_status": "reopened",
         "updated_at": now,
     }

@@ -9,12 +9,15 @@ class Priority(str, enum.Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    URGENT = "urgent"
 
 
 class Status(str, enum.Enum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
+    ON_HOLD = "on_hold"
     RESOLVED = "resolved"
+    REOPENED = "reopened"
     CLOSED = "closed"
 
 
