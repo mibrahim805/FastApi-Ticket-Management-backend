@@ -421,6 +421,9 @@ def get_tickets_summary(current_user: dict = Depends(get_current_user)):
                 "low_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "low"]}, 1, 0]}
                 },
+                "urgent_priority_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$priority", "urgent"]}, 1, 0]}
+                },
             }
         },
         {"$project": {"_id": 0}},
