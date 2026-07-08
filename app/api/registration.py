@@ -151,8 +151,7 @@ def activate_or_deactivate(
 
 @router.put("/update_yourself/", tags=["Auth"])
 def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_user)):
-
-    db_user = user_collection.find_one(str(ObjectId(current_user["_id"])))
+    db_user = user_collection.find_one({"_id": ObjectId(current_user["_id"])})
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     update_data = user.dict(exclude_unset=True)

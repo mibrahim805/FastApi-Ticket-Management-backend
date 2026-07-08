@@ -166,7 +166,6 @@ def update_ticket(
             status_code=403, detail="You can only update your own tickets"
         )
 
-    # Validate: ticket must be assigned before moving to IN_PROGRESS
     if data.status and data.status.lower() == "in_progress":
         if not ticket.get("assigned_agent"):
             raise HTTPException(
@@ -356,7 +355,7 @@ def get_tickets(
     now = datetime.now(timezone.utc)
     for ticket in cursor:
         ticket["_id"] = str(ticket["_id"])
-        # Add computed overdue field
+
         if ticket.get("due_date") and ticket.get("current_status_name") not in [
             "resolved",
             "closed",
