@@ -30,6 +30,10 @@ class UserLogin(BaseModel):
     password: str
 
 
+class ChangeUserRole(BaseModel):
+    role: Role
+
+
 class UserUpdate(BaseModel):
     name: str
     password: str

@@ -581,30 +581,51 @@ def move_ticket_forward(
 
 
 @router.put("/tickets/{ticket_id}/reopen", tags=["Tickets"])
-def reopen_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
+def reopen_ticket(
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     ticket = ticket_collection.find_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}
     )
+
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(status_code=403, detail="Only admins can reopen tickets")
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can reopen tickets",
+        )
 
     if ticket.get("current_status_name") not in ["closed", "resolved"]:
         raise HTTPException(
-            status_code=400, detail="Only closed or resolved tickets can be reopened"
+            status_code=400,
+            detail="Only closed or resolved tickets can be reopened",
+        )
+
+    todo_status = statuses_collection.find_one(
+        {"_id": ObjectId("6a3e51ab44af721870a9a221")}
+    )
+
+    if not todo_status:
+        raise HTTPException(
+            status_code=404,
+            detail="To Do status not found",
         )
 
     now = datetime.now(timezone.utc)
+
     ticket_collection.update_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")},
         {
             "$set": {
-                "current_status_name": "reopened",
+                "current_status_id": str(todo_status["_id"]),
+                "current_status_name": todo_status["name"],
                 "updated_by": str(current_user["_id"]),
                 "updated_at": now,
                 "closed_date": None,
+                "resolved_date": None,
             }
         },
     )
@@ -614,6 +635,7 @@ def reopen_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         user_id=str(current_user["_id"]),
         event_type="ticket_reopened",
     )
+
     notifications_collection.insert_one(notification.dict())
 
     log_activity(
@@ -623,8 +645,8 @@ def reopen_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         changes=[
             {
                 "field": "status",
-                "old_value": ticket.get("current_status_name"),
-                "new_value": "reopened",
+                "old_value": ticket["current_status_name"],
+                "new_value": todo_status["name"],
             }
         ],
     )
@@ -632,7 +654,7 @@ def reopen_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
     return {
         "ticket_id": ticket_id,
         "ticket_code": ticket["ticket_code"],
-        "previous_status": ticket.get("current_status_name"),
-        "current_status": "reopened",
+        "previous_status": ticket["current_status_name"],
+        "current_status": todo_status["name"],
         "updated_at": now,
     }

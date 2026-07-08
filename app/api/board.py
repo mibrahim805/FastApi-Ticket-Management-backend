@@ -30,7 +30,7 @@ def get_boards(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/boards/{board_id}")
-@super_admin_required
+# @super_admin_required
 def get_board(board_id: str, current_user: dict = Depends(get_current_user)):
     board = boards_collection.find_one({"_id": ObjectId(board_id)})
     if not board:
