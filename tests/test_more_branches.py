@@ -78,26 +78,22 @@ def test_board_assign_update_delete_success(monkeypatch, fake_collection):
 
     # assign_board success when no assigned_agent
     bid = boards.insert_one({"_id": ObjectId(), "assigned_agent": None}).inserted_id
-    import asyncio
 
-    resp = asyncio.run(
-        board_mod.assign_board(
-            str(bid),
-            AssignBoard(agent_id="agent1"),
-            current_user={"_id": ObjectId(), "role": "super_admin"},
-        )
+    resp = board_mod.assign_board(
+        str(bid),
+        AssignBoard(agent_id="agent1"),
+        current_user={"_id": ObjectId(), "role": "super_admin"},
     )
     assert resp["message"] == "Board assigned to agent"
     assert boards.documents[-1]["assigned_agent"] == "agent1"
 
     # reassignment allowed for super_admin
-    resp2 = asyncio.run(
-        board_mod.assign_board(
-            str(bid),
-            AssignBoard(agent_id="agent2"),
-            current_user={"_id": ObjectId(), "role": "super_admin"},
-        )
+    resp2 = board_mod.assign_board(
+        str(bid),
+        AssignBoard(agent_id="agent2"),
+        current_user={"_id": ObjectId(), "role": "super_admin"},
     )
+
     assert resp2["message"] == "Board assigned to agent"
     assert boards.documents[-1]["assigned_agent"] == "agent2"
 
@@ -106,30 +102,25 @@ def test_board_assign_update_delete_success(monkeypatch, fake_collection):
     uid = str(boards.documents[-1]["_id"])
     from app.models.board import BoardCreate
 
-    resp3 = asyncio.run(
-        board_mod.update_board(
-            BoardCreate(name="New", code="C"), uid, current_user={"role": "super_admin"}
-        )
+    resp3 = board_mod.update_board(
+        BoardCreate(name="New", code="C"), uid, current_user={"role": "super_admin"}
     )
+
     assert resp3["message"] == "Board updated"
 
     # get_board success when assigned_agent matches
     # test by setting assigned_agent to current_user
     uid2 = ObjectId()
     boards.insert_one({"_id": ObjectId(), "assigned_agent": str(uid2)})
-    res_get = asyncio.run(
-        board_mod.get_board(
-            str(boards.documents[-1]["_id"]),
-            current_user={"_id": uid2, "role": "super_admin"},
-        )
+    res_get = board_mod.get_board(
+        str(boards.documents[-1]["_id"]),
+        current_user={"_id": uid2, "role": "super_admin"},
     )
     assert "board" in res_get
 
     # delete success
     d = boards.insert_one({"_id": ObjectId()}).inserted_id
-    resp4 = asyncio.run(
-        board_mod.delete_board(str(d), current_user={"role": "super_admin"})
-    )
+    resp4 = board_mod.delete_board(str(d), current_user={"role": "super_admin"})
     assert resp4["message"] == "Board deleted"
 
 
@@ -294,17 +285,28 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
 
 
 # registration extra branches
-def test_registration_admin_cannot_create_super_admin(monkeypatch, fake_collection):
+def test_register_admin_or_agent_cannot_create_super_admin(
+    monkeypatch, fake_collection
+):
     from app.api import registration
 
     users = fake_collection.__class__()
     monkeypatch.setattr(registration, "user_collection", users)
 
     payload = registration.UserRegister(
-        name="X", email="x@example.com", password="p", role="super_admin"
+        name="X",
+        email="x@example.com",
+        password="p",
+        role="super_admin",
     )
-    with pytest.raises(HTTPException):
-        registration.register(payload, current_user={"role": "admin"})
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register_admin_or_agent(
+            payload,
+            current_user={"role": "super_admin"},
+        )
+
+    assert exc_info.value.status_code == 400
 
 
 def test_activate_or_deactivate_activates(monkeypatch, fake_collection):

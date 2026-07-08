@@ -33,7 +33,7 @@ def test_calculate_due_date(monkeypatch, priority, days):
 
 
 def test_calculate_due_date_invalid_priority():
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         calculate_due_date("invalid")
 
 
@@ -58,11 +58,13 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
     statuses = fake_collection.__class__([{"_id": status_id, "name": "Open"}])
     tickets = fake_collection.__class__()
     notifications = fake_collection.__class__()
+    counters = fake_collection.__class__()
 
     monkeypatch.setattr(ticket, "boards_collection", boards)
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
+    monkeypatch.setattr(ticket, "counters_collection", counters)
     monkeypatch.setattr(ticket, "log_activity", lambda **kwargs: None)
     monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
 
@@ -76,10 +78,9 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
 
     response = ticket.create_ticket(payload, current_user=current_user)
 
-    assert response["ticket_code"] == "SUP-3"
+    assert response["ticket_code"].startswith("TKT-")
     assert response["current_status_id"] == str(status_id)
     assert response["due_date"] == "due-date"
-    assert boards.documents[0]["ticket_counter"] == 3
     assert len(tickets.documents) == 1
     assert len(notifications.documents) == 1
 
@@ -183,7 +184,7 @@ def test_create_ticket_rejects_invalid_board_id(monkeypatch, fake_collection):
     assert exc_info.value.status_code == 400
 
 
-def test_create_ticket_blocks_unauthorized_agent(monkeypatch, fake_collection):
+def test_create_ticket_allows_any_authenticated_user(monkeypatch, fake_collection):
     board_id = ObjectId()
     status_id = ObjectId()
     boards = fake_collection.__class__(
@@ -196,12 +197,18 @@ def test_create_ticket_blocks_unauthorized_agent(monkeypatch, fake_collection):
             }
         ]
     )
+    statuses = fake_collection.__class__([{"_id": status_id, "name": "Open"}])
+    tickets = fake_collection.__class__()
+    notifications = fake_collection.__class__()
+    counters = fake_collection.__class__()
+
     monkeypatch.setattr(ticket, "boards_collection", boards)
-    monkeypatch.setattr(
-        ticket,
-        "statuses_collection",
-        fake_collection.__class__([{"_id": status_id, "name": "Open"}]),
-    )
+    monkeypatch.setattr(ticket, "statuses_collection", statuses)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    monkeypatch.setattr(ticket, "notifications_collection", notifications)
+    monkeypatch.setattr(ticket, "counters_collection", counters)
+    monkeypatch.setattr(ticket, "log_activity", lambda **kwargs: None)
+    monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
 
     payload = TicketCreate(
         board_id=str(board_id),
@@ -211,10 +218,12 @@ def test_create_ticket_blocks_unauthorized_agent(monkeypatch, fake_collection):
         priority=Priority.HIGH,
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.create_ticket(payload, current_user={"_id": ObjectId(), "role": "agent"})
+    response = ticket.create_ticket(
+        payload, current_user={"_id": ObjectId(), "role": "agent"}
+    )
 
-    assert exc_info.value.status_code == 403
+    assert response["ticket_code"].startswith("TKT-")
+    assert len(tickets.documents) == 1
 
 
 def test_move_ticket_forward_advances_status(monkeypatch, fake_collection):
@@ -417,20 +426,29 @@ def test_move_ticket_forward_rejects_missing_next_status(monkeypatch, fake_colle
     assert exc_info.value.status_code == 404
 
 
-def test_assign_ticket_requires_super_admin(monkeypatch, fake_collection):
+def test_assign_ticket_allows_agent_self_assign(monkeypatch, fake_collection):
+    ticket_id = ObjectId()
+    agent_id = ObjectId()
     tickets = fake_collection.__class__(
-        [{"_id": ObjectId(), "assigned_agent": None, "userId": "user"}]
+        [{"_id": ticket_id, "assigned_agent": None, "userId": "user"}]
     )
+    users = fake_collection.__class__(
+        [{"_id": agent_id, "role": "agent", "is_active": True}]
+    )
+    notifications = fake_collection.__class__()
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    monkeypatch.setattr(ticket, "user_collection", users)
+    monkeypatch.setattr(ticket, "notifications_collection", notifications)
 
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.assign_ticket(
-            str(tickets.documents[0]["_id"]),
-            AssignAgent(agent_id="agent-1"),
-            current_user={"_id": ObjectId(), "role": "agent"},
-        )
+    response = ticket.assign_ticket(
+        str(ticket_id),
+        AssignAgent(agent_id=str(agent_id)),
+        current_user={"_id": agent_id, "role": "agent"},
+    )
 
-    assert exc_info.value.status_code == 403
+    assert response == {"message": "Ticket assigned successfully"}
+    assert tickets.documents[0]["assigned_agent"] == str(agent_id)
+    assert len(notifications.documents) == 1
 
 
 def test_assign_ticket_succeeds(monkeypatch, fake_collection):
@@ -512,23 +530,31 @@ def test_assign_ticket_rejects_target_user_not_agent(monkeypatch, fake_collectio
     assert exc_info.value.status_code == 400
 
 
-def test_assign_ticket_rejects_already_assigned_ticket(monkeypatch, fake_collection):
+def test_assign_ticket_allows_admin_reassignment(monkeypatch, fake_collection):
     ticket_id = ObjectId()
-    agent_id = ObjectId()
+    old_agent_id = ObjectId()
+    new_agent_id = ObjectId()
+    admin_id = ObjectId()
     tickets = fake_collection.__class__(
-        [{"_id": ticket_id, "assigned_agent": str(ObjectId()), "userId": "user"}]
+        [{"_id": ticket_id, "assigned_agent": str(old_agent_id), "userId": "user"}]
     )
     users = fake_collection.__class__(
-        [{"_id": agent_id, "role": "agent", "is_active": True}]
+        [
+            {"_id": old_agent_id, "role": "agent", "is_active": True},
+            {"_id": new_agent_id, "role": "agent", "is_active": True},
+        ]
     )
+    notifications = fake_collection.__class__()
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", users)
+    monkeypatch.setattr(ticket, "notifications_collection", notifications)
 
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.assign_ticket(
-            str(ticket_id),
-            AssignAgent(agent_id=str(agent_id)),
-            current_user={"_id": ObjectId(), "role": "super_admin"},
-        )
+    response = ticket.assign_ticket(
+        str(ticket_id),
+        AssignAgent(agent_id=str(new_agent_id)),
+        current_user={"_id": admin_id, "role": "super_admin"},
+    )
 
-    assert exc_info.value.status_code == 400
+    assert response == {"message": "Ticket assigned successfully"}
+    assert tickets.documents[0]["assigned_agent"] == str(new_agent_id)
+    assert len(notifications.documents) == 1

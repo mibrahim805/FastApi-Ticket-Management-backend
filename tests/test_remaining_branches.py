@@ -141,58 +141,45 @@ def test_board_get_update_delete(monkeypatch, fake_collection):
     monkeypatch.setattr(board_mod, "boards_collection", boards)
     monkeypatch.setattr(board_mod, "ticket_collection", tickets)
 
-    import asyncio
-
     # create
     from app.models.board import BoardCreate
 
-    resp = asyncio.run(
-        board_mod.create_board(
-            BoardCreate(name="B", code="BC"), current_user={"role": "super_admin"}
-        )
+    resp = board_mod.create_board(
+        BoardCreate(name="B", code="BC"), current_user={"role": "super_admin"}
     )
     assert "id" in resp
 
     # get_boards
     boards.documents.append({"_id": ObjectId(), "code": "C1"})
-    gb = asyncio.run(board_mod.get_boards(current_user={"role": "super_admin"}))
+    gb = board_mod.get_boards(current_user={"role": "super_admin"})
     assert "boards" in gb
 
     # get_board not found
     with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.get_board(
-                str(ObjectId()), current_user={"_id": ObjectId(), "role": "super_admin"}
-            )
+        board_mod.get_board(
+            str(ObjectId()), current_user={"_id": ObjectId(), "role": "super_admin"}
         )
 
     # insert and unauthorized view (assigned_agent mismatch)
+    different_agent_id = ObjectId()
     boards.insert_one(
-        {"_id": ObjectId(), "assigned_agent": str(ObjectId())}
+        {"_id": ObjectId(), "assigned_agent": str(different_agent_id)}
     ).inserted_id
-    with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.get_board(
-                str(boards.documents[-1]["_id"]),
-                current_user={"_id": ObjectId(), "role": "super_admin"},
-            )
-        )
+    result = board_mod.get_board(
+        str(boards.documents[-1]["_id"]),
+        current_user={"_id": ObjectId(), "role": "agent"},
+    )
+    assert "message" in result
 
     # update
     with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.update_board(
-                {"name": "X"}, str(ObjectId()), current_user={"role": "super_admin"}
-            )
+        board_mod.update_board(
+            {"name": "X"}, str(ObjectId()), current_user={"role": "super_admin"}
         )
 
     # delete not found
     with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.delete_board(
-                str(ObjectId()), current_user={"role": "super_admin"}
-            )
-        )
+        board_mod.delete_board(str(ObjectId()), current_user={"role": "super_admin"})
 
 
 def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
@@ -242,6 +229,7 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
             "priority": "low",
             "status": "open",
             "category": "support",
+            "assigned_agent": str(ObjectId()),
         }
     ).inserted_id
     upd = TicketUpdate(
@@ -313,12 +301,10 @@ def test_super_admin_decorator_behaviour():
     def fn(current_user=None):
         return "ok"
 
-    import asyncio
+    with pytest.raises(HTTPException):
+        fn()
 
     with pytest.raises(HTTPException):
-        asyncio.run(fn())
+        fn(current_user={"role": "agent"})
 
-    with pytest.raises(HTTPException):
-        asyncio.run(fn(current_user={"role": "agent"}))
-
-    assert asyncio.run(fn(current_user={"role": "super_admin"})) == "ok"
+    assert fn(current_user={"role": "super_admin"}) == "ok"

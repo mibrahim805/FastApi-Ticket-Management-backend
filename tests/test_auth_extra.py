@@ -61,14 +61,23 @@ def test_reset_password_invalid_token(monkeypatch, fake_collection):
 
 
 def test_reset_password_success(monkeypatch, fake_collection):
+    uid = ObjectId()
+
     users = fake_collection.__class__(
-        [{"_id": "user123", "email": "u@example.com", "password": "old"}]
+        [
+            {
+                "_id": uid,
+                "email": "u@example.com",
+                "hashed_password": "oldhash",
+            }
+        ]
     )
+
     resets = fake_collection.__class__(
         [
             {
                 "token": "tok",
-                "user_id": "user123",
+                "user_id": str(uid),
                 "email": "u@example.com",
                 "type": "password_reset",
                 "used": False,
@@ -76,19 +85,26 @@ def test_reset_password_success(monkeypatch, fake_collection):
             }
         ]
     )
-    monkeypatch.setattr(registration, "reset_tokens_collection", resets)
+
     monkeypatch.setattr(registration, "user_collection", users)
-    monkeypatch.setattr(registration, "hash_password", lambda p: f"hashed:{p}")
+    monkeypatch.setattr(registration, "reset_tokens_collection", resets)
+    monkeypatch.setattr(
+        registration,
+        "hash_password",
+        lambda password: f"hashed:{password}",
+    )
 
-    resp = registration.reset_password("tok", "newpass")
-    assert resp == {"message": "Password reset successful"}
+    response = registration.reset_password("tok", "newpass")
 
-    # user password updated
-    u = users.find_one({"_id": "user123"})
-    assert u["password"] == "hashed:newpass"
-    # token marked used
-    rec = resets.find_one({"token": "tok"})
-    assert rec["used"] is True
+    assert response == {"message": "Password reset successful"}
+
+    # Password updated
+    updated_user = users.find_one({"_id": uid})
+    assert updated_user["hashed_password"] == "hashed:newpass"
+
+    # Token marked as used
+    updated_token = resets.find_one({"token": "tok"})
+    assert updated_token["used"] is True
 
 
 def test_activate_or_deactivate_and_updates(monkeypatch, fake_collection):

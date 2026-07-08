@@ -49,6 +49,11 @@ def list_notifications(
 
     total_pages = (total_count + page_size - 1) // page_size
 
+    print("Query:", query)
+    print("Collection:", notifications_collection)
+    print("Documents:", notifications_collection.documents)
+    print("Count:", notifications_collection.count_documents(query))
+
     return {
         "data": notifications,
         "pagination": {

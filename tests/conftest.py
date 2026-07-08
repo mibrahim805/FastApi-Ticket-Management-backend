@@ -25,8 +25,18 @@ class _InsertOneResult:
 class FakeCursor:
     def __init__(self, documents: list[dict[str, Any]]):
         self._documents = documents
+        self._sort_field = None
+        self._sort_order = 1
 
-    def sort(self, *args, **kwargs):
+    def sort(self, field, order=1):
+        self._sort_field = field
+        self._sort_order = order
+        if self._sort_field:
+            self._documents = sorted(
+                self._documents,
+                key=lambda x: x.get(self._sort_field, ""),
+                reverse=(order == -1),
+            )
         return self
 
     def skip(self, value):
@@ -88,6 +98,32 @@ class FakeCollection:
     def find(self, query=None):
         query = query or {}
         return FakeCursor([doc for doc in self.documents if _matches(doc, query)])
+
+    def find_one_and_update(self, query, update, upsert=False, return_document=True):
+        if isinstance(query, ObjectId):
+            query = {"_id": query}
+        for document in self.documents:
+            if _matches(document, query):
+                if "$set" in update:
+                    document.update(update["$set"])
+                elif "$inc" in update:
+                    for key, value in update["$inc"].items():
+                        document[key] = document.get(key, 0) + value
+                self.updated_documents.append((query, update))
+                return deepcopy(document)
+
+        if upsert:
+            new_doc = deepcopy(query)
+            new_doc.setdefault("_id", ObjectId())
+            if "$set" in update:
+                new_doc.update(update["$set"])
+            elif "$inc" in update:
+                for key, value in update["$inc"].items():
+                    new_doc[key] = new_doc.get(key, 0) + value
+            self.documents.append(new_doc)
+            return deepcopy(new_doc)
+
+        return None
 
 
 @pytest.fixture

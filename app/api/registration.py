@@ -41,7 +41,7 @@ def register_super_admin(user: SuperAminRegister):
 
 
 @router.post("/register", tags=["Auth"])
-def register_user(user: UserRegister):
+def register(user: UserRegister):
     existing_email = user_collection.find_one({"email": user.email})
     allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
     valid_roles = {role.value for role in Role}
@@ -154,7 +154,7 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
     db_user = user_collection.find_one({"_id": ObjectId(current_user["_id"])})
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
-    update_data = user.dict(exclude_unset=True)
+    update_data = user.model_dump(exclude_unset=True)
 
     if "password" in update_data:
         update_data["password"] = hash_password(update_data["password"])
