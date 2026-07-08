@@ -17,7 +17,7 @@ def create_comment(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     if (
-        current_user["_id"] != ticket["userId"]
+        str(current_user["_id"]) != ticket["userId"]
         and current_user["role"] != "super_admin"
     ):
         raise HTTPException(

@@ -41,7 +41,7 @@ def register_super_admin(user: SuperAminRegister):
 
 
 @router.post("/register", tags=["Auth"])
-def register(user: UserRegister):
+def register_user(user: UserRegister):
     existing_email = user_collection.find_one({"email": user.email})
     allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
     valid_roles = {role.value for role in Role}
@@ -69,6 +69,41 @@ def register(user: UserRegister):
 
     user_collection.insert_one(user_data)
     return {"message": "User registered successfully"}
+
+
+@router.post("/register_admin_or_agent", tags=["Auth"])
+def register_admin_or_agent(
+    user: UserRegister, current_user: dict = Depends(get_current_user)
+):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only super admin can register an admin or agent",
+        )
+
+    existing_email = user_collection.find_one({"email": user.email})
+    allowed_roles = {Role.ADMIN.value, Role.AGENT.value}
+
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    if user.role not in allowed_roles:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid role. Only 'admin' or 'agent' roles are allowed.",
+        )
+
+    hashed_password = hash_password(user.password)
+    user_data = {
+        "name": user.name,
+        "email": user.email,
+        "hashed_password": hashed_password,
+        "role": user.role,
+        "is_active": user.is_active,
+    }
+
+    user_collection.insert_one(user_data)
+    return {"message": f"{user.role.capitalize()} registered successfully"}
 
 
 @router.post("/login", tags=["Auth"])
@@ -120,7 +155,12 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
     db_user = user_collection.find_one(ObjectId(current_user["_id"]))
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
-    user_collection.update_one({"_id": db_user["_id"]}, {"$set": user.dict()})
+    update_data = user.dict(exclude_unset=True)
+
+    if "password" in update_data:
+        update_data["password"] = hash_password(update_data["password"])
+
+    user_collection.update_one({"_id": db_user["_id"]}, {"$set": update_data})
     return {"message": "User updated successfully"}
 
 

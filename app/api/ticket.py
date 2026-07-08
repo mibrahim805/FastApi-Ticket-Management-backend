@@ -128,8 +128,10 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(
-        current_user["_id"]
+    if (
+        current_user["role"] != "super_admin"
+        and ticket["userId"] != str(current_user["_id"])
+        and ticket.get("assigned_agent") != str(current_user["_id"])
     ):
         raise HTTPException(
             status_code=403, detail="You can only view your own tickets"
@@ -155,8 +157,10 @@ def update_ticket(
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(
-        current_user["_id"]
+    if (
+        current_user["role"] != "super_admin"
+        and ticket["userId"] != str(current_user["_id"])
+        and ticket.get("assigned_agent") != str(current_user["_id"])
     ):
         raise HTTPException(
             status_code=403, detail="You can only update your own tickets"
@@ -167,7 +171,7 @@ def update_ticket(
         if not ticket.get("assigned_agent"):
             raise HTTPException(
                 status_code=400,
-                detail=("Ticket must be assigned before moving to IN_PROGRESS"),
+                detail="Ticket must be assigned before moving to IN_PROGRESS",
             )
 
     update_data = data.model_dump(exclude_none=True)
@@ -235,7 +239,6 @@ def assign_ticket(
     if agent.get("role") != "agent":
         raise HTTPException(status_code=400, detail="Target user is not an agent")
 
-    # Allow self-assignment by agents or reassignment by admins
     is_self_assign = (
         str(current_user["_id"]) == data.agent_id and current_user["role"] == "agent"
     )
@@ -400,17 +403,44 @@ def get_tickets_summary(current_user: dict = Depends(get_current_user)):
             "$group": {
                 "_id": None,
                 "total_tickets": {"$sum": 1},
-                "open_tickets": {
-                    "$sum": {"$cond": [{"$eq": ["$status", "open"]}, 1, 0]}
+                "to_do_tickets": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "to_do"]}, 1, 0]
+                    }
                 },
-                "in_progress_tickets": {
-                    "$sum": {"$cond": [{"$eq": ["$status", "in_progress"]}, 1, 0]}
+                "in_development_tickets": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$current_status_name", "in_development"]},
+                            1,
+                            0,
+                        ]
+                    }
                 },
-                "resolved_tickets": {
-                    "$sum": {"$cond": [{"$eq": ["$status", "resolved"]}, 1, 0]}
+                "in_qa_tickets": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "in_qa"]}, 1, 0]
+                    }
+                },
+                "qa_passed_tickets": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "qa_passed"]}, 1, 0]
+                    }
+                },
+                "deployed_tickets": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "deployed"]}, 1, 0]
+                    }
                 },
                 "closed_tickets": {
-                    "$sum": {"$cond": [{"$eq": ["$status", "closed"]}, 1, 0]}
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "closed"]}, 1, 0]
+                    }
+                },
+                "reopened_tickets": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$current_status_name", "reopened"]}, 1, 0]
+                    }
                 },
                 "high_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "high"]}, 1, 0]}
@@ -438,8 +468,10 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
     ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(
-        current_user["_id"]
+    if (
+        current_user["role"] != "super_admin"
+        and ticket["userId"] != str(current_user["_id"])
+        and ticket.get("assigned_agent") != str(current_user["_id"])
     ):
         raise HTTPException(
             status_code=403, detail="You can only delete your own tickets"
@@ -467,8 +499,10 @@ def move_ticket_forward(
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if current_user["role"] != "super_admin" and ticket["userId"] != str(
-        current_user["_id"]
+    if (
+        current_user["role"] != "super_admin"
+        and ticket["userId"] != str(current_user["_id"])
+        and ticket.get("assigned_agent") != str(current_user["_id"])
     ):
         raise HTTPException(
             status_code=403, detail="Only agents or admins can move tickets"
@@ -507,8 +541,17 @@ def move_ticket_forward(
     next_status = statuses_collection.find_one(
         {"_id": _parse_object_id(next_status_id, "status_id")}
     )
+
     if not next_status:
         raise HTTPException(status_code=404, detail="Next status not found")
+
+    if next_status["name"].lower() == "in_progress" and not ticket.get(
+        "assigned_agent"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Ticket must be assigned before moving to IN_PROGRESS.",
+        )
 
     now = datetime.now(timezone.utc)
     update_fields = {
