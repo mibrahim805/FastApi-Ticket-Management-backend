@@ -169,7 +169,10 @@ def test_update_yourself_and_change_password(monkeypatch, fake_collection):
         UserUpdate(name="New", password="pw", is_active=True), current_user={"_id": uid}
     )
     assert resp == {"message": "User updated successfully"}
-    assert users.find_one({"_id": uid})["name"] == "New"
+    updated_user = users.find_one({"_id": uid})
+    assert updated_user["name"] == "New"
+    assert updated_user["hashed_password"] == "hashed:pw"
+    assert "password" not in updated_user
 
     # change_password: missing db_user
     with pytest.raises(HTTPException) as exc2:

@@ -157,7 +157,7 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
     update_data = user.model_dump(exclude_unset=True)
 
     if "password" in update_data:
-        update_data["password"] = hash_password(update_data["password"])
+        update_data["hashed_password"] = hash_password(update_data.pop("password"))
 
     user_collection.update_one({"_id": db_user["_id"]}, {"$set": update_data})
     return {"message": "User updated successfully"}
