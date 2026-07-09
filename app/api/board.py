@@ -72,7 +72,9 @@ def update_board(
     board = boards_collection.find_one({"_id": ObjectId(board_id)})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    boards_collection.update_one({"_id": ObjectId(board_id)}, {"$set": data.dict()})
+    boards_collection.update_one(
+        {"_id": ObjectId(board_id)}, {"$set": data.model_dump()}
+    )
     return {"message": "Board updated"}
 
 

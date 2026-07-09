@@ -43,7 +43,7 @@ def create_comment(
         user_id=str(current_user["_id"]),
         event_type="comment_created",
     )
-    notifications_collection.insert_one(notification.dict())
+    notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Comment added"}
 

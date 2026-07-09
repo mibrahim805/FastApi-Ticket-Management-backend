@@ -64,7 +64,7 @@ def update_status(
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
-    update_data = {k: v for k, v in payload.dict().items() if v is not None}
+    update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields provided to update")
 

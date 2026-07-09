@@ -121,7 +121,7 @@ def create_ticket(
         user_id=str(current_user["_id"]),
         event_type="ticket_created",
     )
-    notification_record = notifications_collection.insert_one(notification.dict())
+    notification_record = notifications_collection.insert_one(notification.model_dump())
     ticket["notification_id"] = str(notification_record.inserted_id)
 
     return ticket
@@ -269,7 +269,7 @@ def assign_ticket(
         user_id=str(current_user["_id"]),
         event_type="ticket_assigned",
     )
-    notifications_collection.insert_one(notification.dict())
+    notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Ticket assigned successfully"}
 
@@ -495,7 +495,7 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         user_id=str(current_user["_id"]),
         event_type="ticket_deleted",
     )
-    notifications_collection.insert_one(notification.dict())
+    notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Ticket deleted successfully"}
 
@@ -647,7 +647,7 @@ def reopen_ticket(
         event_type="ticket_reopened",
     )
 
-    notifications_collection.insert_one(notification.dict())
+    notifications_collection.insert_one(notification.model_dump())
 
     log_activity(
         ticket_id=ticket_id,
