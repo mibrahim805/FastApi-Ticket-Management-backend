@@ -30,6 +30,12 @@ def _parse_object_id(value: str, field_name: str) -> ObjectId:
         raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
 
 
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def calculate_due_date(priority: str) -> datetime:
     now = datetime.now(timezone.utc)
 
@@ -304,10 +310,12 @@ def get_tickets(
 
     query["board_code"] = board["code"]
 
-    if current_user["role"] == "super_admin":
-        pass
-    else:
-        query["userId"] = str(current_user["_id"])
+    if current_user["role"] != "super_admin":
+        current_user_id = str(current_user["_id"])
+        query["$or"] = [
+            {"userId": current_user_id},
+            {"assigned_agent": current_user_id},
+        ]
     if status:
         query["status"] = status.lower()
     if priority:
@@ -327,10 +335,14 @@ def get_tickets(
 
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)
-        query["$or"] = [
+        search_query = [
             {"title": {"$regex": search_regex}},
             {"ticket_code": {"$regex": search_regex}},
         ]
+        if "$or" in query:
+            query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_query}]
+        else:
+            query["$or"] = search_query
 
     SORT_FIELD_MAP = {
         "created_at": "created_date",
@@ -360,7 +372,7 @@ def get_tickets(
             "resolved",
             "closed",
         ]:
-            ticket["is_overdue"] = ticket["due_date"] < now
+            ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
         else:
             ticket["is_overdue"] = False
         tickets.append(ticket)

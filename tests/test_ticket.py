@@ -226,6 +226,111 @@ def test_create_ticket_allows_any_authenticated_user(monkeypatch, fake_collectio
     assert len(tickets.documents) == 1
 
 
+def test_get_tickets_includes_tickets_assigned_to_current_user(
+    monkeypatch, fake_collection
+):
+    board_code = "SUPPORT"
+    current_user_id = ObjectId()
+    other_user_id = ObjectId()
+
+    boards = fake_collection.__class__([{"_id": ObjectId(), "code": board_code}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "board_code": board_code,
+                "ticket_code": "TKT-1",
+                "userId": str(current_user_id),
+                "assigned_agent": None,
+                "title": "Created by me",
+                "created_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "board_code": board_code,
+                "ticket_code": "TKT-2",
+                "userId": str(other_user_id),
+                "assigned_agent": str(current_user_id),
+                "title": "Assigned to me",
+                "created_date": datetime(2026, 7, 2, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "board_code": board_code,
+                "ticket_code": "TKT-3",
+                "userId": str(other_user_id),
+                "assigned_agent": str(other_user_id),
+                "title": "Not mine",
+                "created_date": datetime(2026, 7, 3, tzinfo=timezone.utc),
+            },
+        ]
+    )
+
+    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+
+    response = ticket.get_tickets(
+        board_code,
+        page=1,
+        page_size=10,
+        status=None,
+        priority=None,
+        category=None,
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+        sort_by="created_at",
+        sort_order="desc",
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    returned_codes = {item["ticket_code"] for item in response["data"]}
+    assert returned_codes == {"TKT-1", "TKT-2"}
+    assert response["pagination"]["total"] == 2
+
+
+def test_get_tickets_handles_naive_due_date(monkeypatch, fake_collection):
+    board_code = "SUPPORT"
+    current_user_id = ObjectId()
+
+    boards = fake_collection.__class__([{"_id": ObjectId(), "code": board_code}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "board_code": board_code,
+                "ticket_code": "TKT-1",
+                "userId": str(current_user_id),
+                "assigned_agent": None,
+                "title": "Naive due date",
+                "current_status_name": "open",
+                "created_date": datetime(2026, 7, 1),
+                "due_date": datetime(2020, 1, 1),
+            }
+        ]
+    )
+
+    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+
+    response = ticket.get_tickets(
+        board_code,
+        page=1,
+        page_size=10,
+        status=None,
+        priority=None,
+        category=None,
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+        sort_by="created_at",
+        sort_order="desc",
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    assert response["data"][0]["is_overdue"] is True
+
+
 def test_move_ticket_forward_advances_status(monkeypatch, fake_collection):
     board_id = ObjectId()
     open_id = ObjectId()

@@ -8,8 +8,17 @@ from bson import ObjectId
 
 def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
     for key, expected in query.items():
+        if key == "$and":
+            if not all(_matches(document, clause) for clause in expected):
+                return False
+            continue
         if key == "$or":
             if not any(_matches(document, clause) for clause in expected):
+                return False
+            continue
+        if isinstance(expected, dict) and "$regex" in expected:
+            value = document.get(key)
+            if value is None or not expected["$regex"].search(str(value)):
                 return False
             continue
         if document.get(key) != expected:
