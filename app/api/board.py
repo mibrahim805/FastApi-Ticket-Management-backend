@@ -4,9 +4,21 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
-from app.db.db import boards_collection, statuses_collection, ticket_collection
+from app.db.db import (
+    board_members_collection,
+    boards_collection,
+    statuses_collection,
+    ticket_collection,
+    user_collection,
+)
 from app.decorator.super_admin import super_admin_required
-from app.models.board import AssignBoard, BoardCreate, BoardStatusAssign
+from app.models.board import (
+    AssignBoard,
+    BoardCreate,
+    BoardMemberCreate,
+    BoardRole,
+    BoardStatusAssign,
+)
 
 router = APIRouter(tags=["Boards"])
 
@@ -14,7 +26,16 @@ router = APIRouter(tags=["Boards"])
 @router.post("/boards")
 @super_admin_required
 def create_board(board: BoardCreate, current_user: dict = Depends(get_current_user)):
-    result = boards_collection.insert_one(board.dict())
+    result = boards_collection.insert_one(board.model_dump())
+
+    board_members_collection.insert_one(
+        {
+            "board_id": result.inserted_id,
+            "user_id": current_user["_id"],
+            "role": BoardRole.LEAD.value,
+        }
+    )
+
     return {"id": str(result.inserted_id), "message": "Board created"}
 
 
@@ -149,3 +170,110 @@ def assign_statuses_to_board(
         "first_status": {"_id": str(statuses[0]["_id"]), "name": statuses[0]["name"]},
         "last_status": {"_id": str(statuses[-1]["_id"]), "name": statuses[-1]["name"]},
     }
+
+
+@router.post("/boards/{board_id}/members")
+def add_board_member(
+    board_id: str,
+    member: BoardMemberCreate,
+    current_user: dict = Depends(get_current_user),
+):
+
+    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    board_member = board_members_collection.find_one(
+        {
+            "board_id": ObjectId(board_id),
+            "user_id": current_user["_id"],
+        }
+    )
+
+    if not board_member:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not a member of this board",
+        )
+
+    if board_member["role"] != BoardRole.LEAD.value:
+        raise HTTPException(
+            status_code=403,
+            detail="Only board leads can add members",
+        )
+
+    user = user_collection.find_one({"_id": ObjectId(member.user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing_member = board_members_collection.find_one(
+        {
+            "board_id": ObjectId(board_id),
+            "user_id": ObjectId(member.user_id),
+        }
+    )
+
+    if existing_member:
+        raise HTTPException(
+            status_code=409,
+            detail="User is already a member of this board",
+        )
+
+    result = board_members_collection.insert_one(
+        {
+            "board_id": ObjectId(board_id),
+            "user_id": ObjectId(member.user_id),
+            "role": member.role.value,
+        }
+    )
+
+    return {
+        "id": str(result.inserted_id),
+        "message": "Board member added successfully",
+    }
+
+
+@router.get("/boards/{board_id}/members")
+def get_board_members(
+    board_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+
+    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    membership = board_members_collection.find_one(
+        {
+            "board_id": ObjectId(board_id),
+            "user_id": current_user["_id"],
+        }
+    )
+
+    if not membership:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not a member of this board",
+        )
+
+    members = []
+
+    for member in board_members_collection.find({"board_id": ObjectId(board_id)}):
+        user = user_collection.find_one(
+            {"_id": member["user_id"]},
+            {
+                "name": 1,
+                "email": 1,
+            },
+        )
+
+        members.append(
+            {
+                "user_id": str(member["user_id"]),
+                "name": user.get("name"),
+                "email": user.get("email"),
+                "role": member["role"],
+            }
+        )
+
+    return members

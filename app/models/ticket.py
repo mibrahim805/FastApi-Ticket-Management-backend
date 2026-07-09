@@ -27,6 +27,14 @@ class Category(str, enum.Enum):
     SUPPORT = "support"
 
 
+class IssueType(str, enum.Enum):
+    BUG = "bug"
+    TASK = "task"
+    STORY = "story"
+    EPIC = "epic"
+    SUBTASK = "subtask"
+
+
 class Ticket(BaseModel):
     board_id: str
     ticket_id: str
@@ -50,6 +58,7 @@ class TicketCreate(BaseModel):
     title: str
     description: str
     category: Category
+    issue_type: IssueType = IssueType.TASK
     priority: Priority
     # created_at: datetime = datetime.now()
     # due_date: datetime

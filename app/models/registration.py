@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr
 
 class Role(str, enum.Enum):
     SUPER_ADMIN = "super_admin"
-    USER = "User"
+    USER = "user"
     ADMIN = "admin"
     CUSTOMER = "customer"
     AGENT = "agent"

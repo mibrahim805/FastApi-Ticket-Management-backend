@@ -86,8 +86,8 @@ def create_ticket(
         upsert=True,
         return_document=True,
     )["counter"]
-
-    ticket_code = f"TKT-{next_number}"
+    board_code = board.get("code", "BOARD")
+    ticket_code = f"{board_code}-{next_number}"
 
     ticket = {
         "board_id": str(board["_id"]),
