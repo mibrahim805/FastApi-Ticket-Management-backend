@@ -18,7 +18,7 @@ from app.db.db import (
     user_collection,
 )
 from app.models.notifications import Notifications
-from app.models.ticket import AssignAgent, TicketCreate, TicketUpdate
+from app.models.ticket import AssignAgent, TicketCreate, TicketStatusMove, TicketUpdate
 
 router = APIRouter()
 
@@ -588,6 +588,135 @@ def move_ticket_forward(
         "previous_status": ticket["current_status_name"],
         "current_status": next_status["name"],
         "updated_at": now,
+    }
+
+
+ALLOWED_STATUS_TRANSITIONS = {
+    "to_do": {"in_development"},
+    "in_development": {"code_review"},
+    "code_review": {"ready_for_qa"},
+    "ready_for_qa": {"in_qa"},
+    "in_qa": {"qa_failed"},
+    "qa_failed": {"in_development"},
+}
+
+
+def normalize_status_name(name: str) -> str:
+    return name.strip().lower().replace(" ", "_")
+
+
+@router.patch("/tickets/{ticket_id}/status", tags=["Tickets"])
+def move_ticket_to_status(
+    ticket_id: str,
+    payload: TicketStatusMove,
+    current_user: dict = Depends(get_current_user),
+):
+
+    try:
+        ticket_object_id = ObjectId(ticket_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid ticket ID",
+        )
+
+    if not payload.target_status_id:
+        raise HTTPException(
+            status_code=400,
+            detail="target_status_id is required",
+        )
+
+    try:
+        status_object_id = ObjectId(payload.target_status_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid target status ID",
+        )
+
+    ticket = ticket_collection.find_one({"_id": ticket_object_id})
+
+    if not ticket:
+        raise HTTPException(
+            status_code=404,
+            detail="Ticket not found",
+        )
+
+    target_status = statuses_collection.find_one({"_id": status_object_id})
+
+    if not target_status:
+        raise HTTPException(
+            status_code=404,
+            detail="Target status not found",
+        )
+
+    current_status_id = ticket.get("current_status_id")
+
+    if not current_status_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Ticket has no current status",
+        )
+
+    try:
+        current_status_object_id = ObjectId(current_status_id)
+    except InvalidId:
+        raise HTTPException(
+            status_code=400,
+            detail="Ticket has an invalid current status ID",
+        )
+
+    current_status = statuses_collection.find_one({"_id": current_status_object_id})
+
+    if not current_status:
+        raise HTTPException(
+            status_code=404,
+            detail="Current status not found",
+        )
+
+    current_status_name = normalize_status_name(current_status["name"])
+    target_status_name = normalize_status_name(target_status["name"])
+
+    allowed_targets = ALLOWED_STATUS_TRANSITIONS.get(current_status_name)
+
+    if allowed_targets is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No transition rules configured for " f"'{current_status['name']}'"
+            ),
+        )
+
+    if target_status_name not in allowed_targets:
+        allowed_names = ", ".join(sorted(allowed_targets))
+
+        if not allowed_names:
+            allowed_names = "none"
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Ticket cannot move from "
+                f"'{current_status['name']}' to "
+                f"'{target_status['name']}'. "
+                f"Allowed next statuses: {allowed_names}"
+            ),
+        )
+
+    ticket_collection.update_one(
+        {"_id": ticket_object_id},
+        {
+            "$set": {
+                "current_status_id": str(target_status["_id"]),
+                "current_status_name": target_status["name"],
+            }
+        },
+    )
+
+    return {
+        "message": "Ticket status updated successfully",
+        "from_status": current_status["name"],
+        "to_status": target_status["name"],
     }
 
 

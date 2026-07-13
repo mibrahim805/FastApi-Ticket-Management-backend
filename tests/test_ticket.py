@@ -6,7 +6,13 @@ from fastapi import HTTPException
 
 from app.api import ticket
 from app.api.ticket import calculate_due_date
-from app.models.ticket import AssignAgent, Category, Priority, TicketCreate
+from app.models.ticket import (
+    AssignAgent,
+    Category,
+    Priority,
+    TicketCreate,
+    TicketStatusMove,
+)
 
 
 @pytest.mark.parametrize(
@@ -374,6 +380,109 @@ def test_move_ticket_forward_advances_status(monkeypatch, fake_collection):
     assert response["previous_status"] == "Open"
     assert response["current_status"] == "In Progress"
     assert tickets.documents[0]["current_status_name"] == "In Progress"
+
+
+def test_move_ticket_status_updates_id_and_name_from_status_id(
+    monkeypatch, fake_collection
+):
+    old_status_id = ObjectId()
+    target_status_id = ObjectId()
+    ticket_id = ObjectId()
+    current_user = {"_id": ObjectId(), "role": "agent"}
+
+    statuses = fake_collection.__class__([{"_id": target_status_id, "name": "Done"}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ticket_id,
+                "board_id": str(ObjectId()),
+                "userId": str(current_user["_id"]),
+                "ticket_code": "SUP-4",
+                "current_status_id": str(old_status_id),
+                "current_status_name": "In QA",
+                "resolved_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+                "closed_date": datetime(2026, 7, 2, tzinfo=timezone.utc),
+            }
+        ]
+    )
+
+    monkeypatch.setattr(ticket, "statuses_collection", statuses)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+
+    response = ticket.move_ticket_status(
+        str(ticket_id),
+        TicketStatusMove(target_status_id=str(target_status_id)),
+        current_user=current_user,
+    )
+
+    assert response == {"message": "Ticket status updated successfully"}
+    assert tickets.documents[0]["current_status_id"] == str(target_status_id)
+    assert tickets.documents[0]["current_status_name"] == "Done"
+    assert tickets.documents[0]["resolved_date"] == datetime(
+        2026, 7, 1, tzinfo=timezone.utc
+    )
+    assert tickets.documents[0]["closed_date"] == datetime(
+        2026, 7, 2, tzinfo=timezone.utc
+    )
+
+
+def test_move_ticket_status_updates_id_and_name_from_status_name(
+    monkeypatch, fake_collection
+):
+    old_status_id = ObjectId()
+    target_status_id = ObjectId()
+    ticket_id = ObjectId()
+
+    statuses = fake_collection.__class__(
+        [{"_id": target_status_id, "name": "QA Passed"}]
+    )
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ticket_id,
+                "current_status_id": str(old_status_id),
+                "current_status_name": "QA Failed",
+            }
+        ]
+    )
+
+    monkeypatch.setattr(ticket, "statuses_collection", statuses)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+
+    response = ticket.move_ticket_status(
+        str(ticket_id),
+        TicketStatusMove(target_status_name="qa passed"),
+        current_user={"_id": ObjectId(), "role": "agent"},
+    )
+
+    assert response == {"message": "Ticket status updated successfully"}
+    assert tickets.documents[0]["current_status_id"] == str(target_status_id)
+    assert tickets.documents[0]["current_status_name"] == "QA Passed"
+
+
+def test_move_ticket_status_rejects_missing_target_status(monkeypatch, fake_collection):
+    ticket_id = ObjectId()
+
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ticket_id,
+                "current_status_id": str(ObjectId()),
+            }
+        ]
+    )
+
+    monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket.move_ticket_status(
+            str(ticket_id),
+            TicketStatusMove(target_status_id=str(ObjectId())),
+            current_user={"_id": ObjectId(), "role": "super_admin"},
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 def test_move_ticket_forward_rejects_last_status(monkeypatch, fake_collection):

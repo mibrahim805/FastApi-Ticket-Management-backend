@@ -95,6 +95,38 @@ def test_create_status_rejects_non_admin(monkeypatch, fake_collection):
     assert exc_info.value.status_code == 403
 
 
+def test_create_default_workflow_statuses_creates_missing_statuses(
+    monkeypatch, fake_collection
+):
+    statuses = fake_collection.__class__()
+    monkeypatch.setattr(status, "statuses_collection", statuses)
+
+    response = status.create_default_workflow_statuses(
+        current_user={"_id": ObjectId(), "role": "super_admin"}
+    )
+
+    created_names = {item["name"] for item in response["created_statuses"]}
+    assert response["created_count"] == 11
+    assert "QA Failed" in created_names
+    assert "Ready for Deployment" in created_names
+    assert response["workflow_statuses"][0]["name"] == "To Do"
+
+
+def test_create_default_workflow_statuses_is_idempotent(monkeypatch, fake_collection):
+    statuses = fake_collection.__class__()
+    monkeypatch.setattr(status, "statuses_collection", statuses)
+
+    status.create_default_workflow_statuses(
+        current_user={"_id": ObjectId(), "role": "super_admin"}
+    )
+    response = status.create_default_workflow_statuses(
+        current_user={"_id": ObjectId(), "role": "super_admin"}
+    )
+
+    assert response["created_count"] == 0
+    assert len(statuses.documents) == 11
+
+
 def test_update_status_rejects_empty_payload(monkeypatch, fake_collection):
     status_id = ObjectId()
     statuses = fake_collection.__class__([{"_id": status_id, "name": "Open"}])
