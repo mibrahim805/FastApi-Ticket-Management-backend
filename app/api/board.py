@@ -28,13 +28,15 @@ router = APIRouter(tags=["Boards"])
 def create_board(board: BoardCreate, current_user: dict = Depends(get_current_user)):
     result = boards_collection.insert_one(board.model_dump())
 
-    board_members_collection.insert_one(
-        {
-            "board_id": result.inserted_id,
-            "user_id": current_user["_id"],
-            "role": BoardRole.LEAD.value,
-        }
-    )
+    current_user_id = current_user.get("_id")
+    if current_user_id:
+        board_members_collection.insert_one(
+            {
+                "board_id": result.inserted_id,
+                "user_id": current_user_id,
+                "role": BoardRole.LEAD.value,
+            }
+        )
 
     return {"id": str(result.inserted_id), "message": "Board created"}
 

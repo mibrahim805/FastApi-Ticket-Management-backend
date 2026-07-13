@@ -84,7 +84,7 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
 
     response = ticket.create_ticket(payload, current_user=current_user)
 
-    assert response["ticket_code"].startswith("TKT-")
+    assert response["ticket_code"].startswith("SUP-")
     assert response["current_status_id"] == str(status_id)
     assert response["due_date"] == "due-date"
     assert len(tickets.documents) == 1
@@ -228,7 +228,7 @@ def test_create_ticket_allows_any_authenticated_user(monkeypatch, fake_collectio
         payload, current_user={"_id": ObjectId(), "role": "agent"}
     )
 
-    assert response["ticket_code"].startswith("TKT-")
+    assert response["ticket_code"].startswith("SUP-")
     assert len(tickets.documents) == 1
 
 

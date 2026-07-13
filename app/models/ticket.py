@@ -78,5 +78,5 @@ class AssignAgent(BaseModel):
 class TicketStatusMove(BaseModel):
     # direction: Optional[Literal["forward", "backward"]] = None
     target_status_id: Optional[str] = None
-    # target_status_name: Optional[str] = None
+    target_status_name: Optional[str] = None
     # comment: Optional[str] = None

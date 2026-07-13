@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
 from app.db.db import boards_collection, statuses_collection
-from app.models.status import StatusUpdate
+from app.models.status import StatusCreate, StatusUpdate
 
 router = APIRouter(prefix="/statuses", tags=["Statuses"])
 
@@ -33,35 +33,35 @@ def _serialize_status(status: dict) -> dict:
     return status
 
 
-# @router.post("/")
-# def create_status(
-#     payload: StatusCreate,
-#     current_user: dict = Depends(get_current_user),
-# ):
-#     if current_user["role"] != "super_admin":
-#         raise HTTPException(
-#             status_code=403, detail="Only super_admin can create statuses"
-#         )
-#
-#     if statuses_collection.find_one({"name": payload.name}):
-#         raise HTTPException(
-#             status_code=400, detail=f"Status '{payload.name}' already exists"
-#         )
-#
-#     if statuses_collection.find_one({"order": payload.order}):
-#         raise HTTPException(
-#             status_code=400,
-#             detail=f"A status with order {payload.order} already exists",
-#         )
-#
-#     status = {
-#         "name": payload.name,
-#         "order": payload.order,
-#         "created_at": datetime.now(timezone.utc),
-#     }
-#     result = statuses_collection.insert_one(status)
-#     status["_id"] = str(result.inserted_id)
-#     return status
+@router.post("/")
+def create_status(
+    payload: StatusCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=403, detail="Only super_admin can create statuses"
+        )
+
+    if statuses_collection.find_one({"name": payload.name}):
+        raise HTTPException(
+            status_code=400, detail=f"Status '{payload.name}' already exists"
+        )
+
+    if statuses_collection.find_one({"order": payload.order}):
+        raise HTTPException(
+            status_code=400,
+            detail=f"A status with order {payload.order} already exists",
+        )
+
+    status = {
+        "name": payload.name,
+        "order": payload.order,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = statuses_collection.insert_one(status)
+    status["_id"] = str(result.inserted_id)
+    return status
 
 
 @router.post("/default-workflow")

@@ -606,102 +606,42 @@ def normalize_status_name(name: str) -> str:
 
 
 @router.patch("/tickets/{ticket_id}/status", tags=["Tickets"])
-def move_ticket_to_status(
+def move_ticket_status(
     ticket_id: str,
     payload: TicketStatusMove,
     current_user: dict = Depends(get_current_user),
 ):
-
-    try:
-        ticket_object_id = ObjectId(ticket_id)
-    except InvalidId:
+    ticket_object_id = ObjectId(ticket_id)
+    requested_statuses = [
+        bool(payload.target_status_id),
+        bool(payload.target_status_name and payload.target_status_name.strip()),
+    ]
+    if sum(requested_statuses) != 1:
         raise HTTPException(
             status_code=400,
-            detail="Invalid ticket ID",
+            detail="Provide exactly one of target_status_id or target_status_name",
         )
 
-    if not payload.target_status_id:
-        raise HTTPException(
-            status_code=400,
-            detail="target_status_id is required",
-        )
-
-    try:
+    if payload.target_status_id:
         status_object_id = ObjectId(payload.target_status_id)
-    except InvalidId:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid target status ID",
+        target_status = statuses_collection.find_one({"_id": status_object_id})
+    else:
+        target_status = statuses_collection.find_one(
+            {
+                "name": {
+                    "$regex": re.compile(
+                        f"^{re.escape(payload.target_status_name.strip())}$",
+                        re.IGNORECASE,
+                    )
+                }
+            }
         )
-
-    ticket = ticket_collection.find_one({"_id": ticket_object_id})
-
-    if not ticket:
-        raise HTTPException(
-            status_code=404,
-            detail="Ticket not found",
-        )
-
-    target_status = statuses_collection.find_one({"_id": status_object_id})
 
     if not target_status:
-        raise HTTPException(
-            status_code=404,
-            detail="Target status not found",
-        )
+        raise HTTPException(status_code=404, detail="Status not found")
 
-    current_status_id = ticket.get("current_status_id")
-
-    if not current_status_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Ticket has no current status",
-        )
-
-    try:
-        current_status_object_id = ObjectId(current_status_id)
-    except InvalidId:
-        raise HTTPException(
-            status_code=400,
-            detail="Ticket has an invalid current status ID",
-        )
-
-    current_status = statuses_collection.find_one({"_id": current_status_object_id})
-
-    if not current_status:
-        raise HTTPException(
-            status_code=404,
-            detail="Current status not found",
-        )
-
-    current_status_name = normalize_status_name(current_status["name"])
-    target_status_name = normalize_status_name(target_status["name"])
-
-    allowed_targets = ALLOWED_STATUS_TRANSITIONS.get(current_status_name)
-
-    if allowed_targets is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No transition rules configured for " f"'{current_status['name']}'"
-            ),
-        )
-
-    if target_status_name not in allowed_targets:
-        allowed_names = ", ".join(sorted(allowed_targets))
-
-        if not allowed_names:
-            allowed_names = "none"
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Ticket cannot move from "
-                f"'{current_status['name']}' to "
-                f"'{target_status['name']}'. "
-                f"Allowed next statuses: {allowed_names}"
-            ),
-        )
+    if not ticket_collection.find_one({"_id": ticket_object_id}):
+        raise HTTPException(status_code=404, detail="Ticket not found")
 
     ticket_collection.update_one(
         {"_id": ticket_object_id},
@@ -713,11 +653,7 @@ def move_ticket_to_status(
         },
     )
 
-    return {
-        "message": "Ticket status updated successfully",
-        "from_status": current_status["name"],
-        "to_status": target_status["name"],
-    }
+    return {"message": "Ticket status updated successfully"}
 
 
 @router.put("/tickets/{ticket_id}/reopen", tags=["Tickets"])
