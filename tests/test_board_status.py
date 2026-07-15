@@ -7,8 +7,11 @@ from app.models.board import BoardStatusAssign
 from app.models.status import StatusCreate, StatusUpdate
 
 
-def test_assign_statuses_to_board_orders_statuses(monkeypatch, fake_collection):
+def test_assign_statuses_to_board_orders_statuses(
+    monkeypatch, fake_collection, grant_board_role
+):
     board_id = ObjectId()
+    lead_id = ObjectId()
     first_id = ObjectId()
     second_id = ObjectId()
 
@@ -22,35 +25,43 @@ def test_assign_statuses_to_board_orders_statuses(monkeypatch, fake_collection):
 
     monkeypatch.setattr(board, "boards_collection", boards)
     monkeypatch.setattr(board, "statuses_collection", statuses)
+    grant_board_role(board_id, lead_id)
 
     response = board.assign_statuses_to_board(
         str(board_id),
         BoardStatusAssign(status_ids=[str(second_id), str(first_id)]),
-        current_user={"_id": ObjectId(), "role": "super_admin"},
+        current_user={"_id": lead_id, "role": "super_admin"},
     )
 
     assert response["assigned_statuses"][0]["name"] == "Open"
     assert boards.documents[0]["assigned_statuses"] == [str(first_id), str(second_id)]
 
 
-def test_assign_statuses_to_board_rejects_non_admin(monkeypatch, fake_collection):
+def test_assign_statuses_to_board_rejects_non_admin(
+    monkeypatch, fake_collection, grant_board_role
+):
     board_id = ObjectId()
+    member_id = ObjectId()
     boards = fake_collection.__class__([{"_id": board_id}])
     monkeypatch.setattr(board, "boards_collection", boards)
     monkeypatch.setattr(board, "statuses_collection", fake_collection.__class__())
+    grant_board_role(board_id, member_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
         board.assign_statuses_to_board(
             str(board_id),
             BoardStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
-            current_user={"_id": ObjectId(), "role": "agent"},
+            current_user={"_id": member_id, "role": "agent"},
         )
 
     assert exc_info.value.status_code == 403
 
 
-def test_assign_statuses_to_board_rejects_duplicate_ids(monkeypatch, fake_collection):
+def test_assign_statuses_to_board_rejects_duplicate_ids(
+    monkeypatch, fake_collection, grant_board_role
+):
     board_id = ObjectId()
+    lead_id = ObjectId()
     status_id = ObjectId()
     boards = fake_collection.__class__([{"_id": board_id}])
     monkeypatch.setattr(board, "boards_collection", boards)
@@ -59,12 +70,13 @@ def test_assign_statuses_to_board_rejects_duplicate_ids(monkeypatch, fake_collec
         "statuses_collection",
         fake_collection.__class__([{"_id": status_id, "name": "Open", "order": 1}]),
     )
+    grant_board_role(board_id, lead_id)
 
     with pytest.raises(HTTPException) as exc_info:
         board.assign_statuses_to_board(
             str(board_id),
             BoardStatusAssign(status_ids=[str(status_id), str(status_id)]),
-            current_user={"_id": ObjectId(), "role": "super_admin"},
+            current_user={"_id": lead_id, "role": "super_admin"},
         )
 
     assert exc_info.value.status_code == 400

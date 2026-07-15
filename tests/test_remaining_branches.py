@@ -23,9 +23,17 @@ def test_activity_get_ticket_activity_not_found(monkeypatch, fake_collection):
     assert exc.value.status_code == 404
 
 
-def test_activity_get_ticket_activity_success(monkeypatch, fake_collection):
+def test_activity_get_ticket_activity_success(
+    monkeypatch, fake_collection, grant_board_role
+):
     ticket_id = str(ObjectId())
-    t = {"_id": ObjectId(ticket_id), "ticket_code": "T-1"}
+    board_id = ObjectId()
+    user_id = ObjectId()
+    t = {
+        "_id": ObjectId(ticket_id),
+        "board_id": str(board_id),
+        "ticket_code": "T-1",
+    }
     tickets = fake_collection.__class__([t])
     acts = fake_collection.__class__(
         [
@@ -38,8 +46,11 @@ def test_activity_get_ticket_activity_success(monkeypatch, fake_collection):
     )
     monkeypatch.setattr(activity, "ticket_collection", tickets)
     monkeypatch.setattr(activity, "ticket_activity_collection", acts)
+    grant_board_role(board_id, user_id, "reporter")
 
-    resp = activity.get_ticket_activity(ticket_id)
+    resp = activity.get_ticket_activity(
+        ticket_id, current_user={"_id": user_id, "role": "customer"}
+    )
     assert "ticket_id" in resp.body.decode()
     assert ticket_id in resp.body.decode()
 
@@ -135,7 +146,7 @@ def test_status_create_and_update_and_delete(monkeypatch, fake_collection):
     assert resp3["message"] == "Status deleted successfully"
 
 
-def test_board_get_update_delete(monkeypatch, fake_collection):
+def test_board_get_update_delete(monkeypatch, fake_collection, grant_board_role):
     boards = fake_collection.__class__()
     tickets = fake_collection.__class__()
     monkeypatch.setattr(board_mod, "boards_collection", boards)
@@ -144,14 +155,18 @@ def test_board_get_update_delete(monkeypatch, fake_collection):
     # create
     from app.models.board import BoardCreate
 
+    super_admin_id = ObjectId()
     resp = board_mod.create_board(
-        BoardCreate(name="B", code="BC"), current_user={"role": "super_admin"}
+        BoardCreate(name="B", code="BC"),
+        current_user={"_id": super_admin_id, "role": "super_admin"},
     )
     assert "id" in resp
 
     # get_boards
     boards.documents.append({"_id": ObjectId(), "code": "C1"})
-    gb = board_mod.get_boards(current_user={"role": "super_admin"})
+    gb = board_mod.get_boards(
+        current_user={"_id": super_admin_id, "role": "super_admin"}
+    )
     assert "boards" in gb
 
     # get_board not found
@@ -165,24 +180,32 @@ def test_board_get_update_delete(monkeypatch, fake_collection):
     boards.insert_one(
         {"_id": ObjectId(), "assigned_agent": str(different_agent_id)}
     ).inserted_id
-    result = board_mod.get_board(
-        str(boards.documents[-1]["_id"]),
-        current_user={"_id": ObjectId(), "role": "agent"},
-    )
-    assert "message" in result
+    with pytest.raises(HTTPException) as exc_info:
+        board_mod.get_board(
+            str(boards.documents[-1]["_id"]),
+            current_user={"_id": ObjectId(), "role": "agent"},
+        )
+    assert exc_info.value.status_code == 403
 
     # update
     with pytest.raises(HTTPException):
         board_mod.update_board(
-            {"name": "X"}, str(ObjectId()), current_user={"role": "super_admin"}
+            {"name": "X"},
+            str(ObjectId()),
+            current_user={"_id": super_admin_id, "role": "super_admin"},
         )
 
     # delete not found
     with pytest.raises(HTTPException):
-        board_mod.delete_board(str(ObjectId()), current_user={"role": "super_admin"})
+        board_mod.delete_board(
+            str(ObjectId()),
+            current_user={"_id": super_admin_id, "role": "super_admin"},
+        )
 
 
-def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
+def test_ticket_get_update_summary_delete(
+    monkeypatch, fake_collection, grant_board_role
+):
     tickets = fake_collection.__class__()
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
@@ -205,24 +228,36 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
         )
 
     # insert ticket and comments and get details unauthorized
-    tid = tickets.insert_one({"_id": ObjectId(), "userId": str(ObjectId())}).inserted_id
+    detail_board_id = ObjectId()
+    tid = tickets.insert_one(
+        {
+            "_id": ObjectId(),
+            "board_id": str(detail_board_id),
+            "userId": str(ObjectId()),
+        }
+    ).inserted_id
     with pytest.raises(HTTPException):
         ticket_mod.get_ticket_details(
             current_user={"_id": ObjectId(), "role": "agent"}, ticket_id=str(tid)
         )
 
     # now as super_admin
+    detail_admin_id = ObjectId()
+    grant_board_role(detail_board_id, detail_admin_id, "reporter")
     resp = ticket_mod.get_ticket_details(
-        current_user={"_id": ObjectId(), "role": "super_admin"}, ticket_id=str(tid)
+        current_user={"_id": detail_admin_id, "role": "super_admin"},
+        ticket_id=str(tid),
     )
     assert "tickets" in resp
 
     # update ticket
     # create ticket with fields
     t_owner = ObjectId()
+    update_board_id = ObjectId()
     tid2 = tickets.insert_one(
         {
             "_id": ObjectId(),
+            "board_id": str(update_board_id),
             "userId": str(t_owner),
             "title": "T",
             "description": "D",
@@ -235,6 +270,7 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
     upd = TicketUpdate(
         status="in_progress", priority="high", category="bug", assigned_to="agent"
     )
+    grant_board_role(update_board_id, t_owner, "member")
     resp2 = ticket_mod.update_ticket(
         str(tid2), upd, current_user={"_id": t_owner, "role": "agent"}
     )
@@ -248,7 +284,9 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
 
     # create board and tickets and test pagination and filters
     bcode = "BC"
-    boards.insert_one({"_id": ObjectId(), "code": bcode})
+    list_board_id = boards.insert_one({"_id": ObjectId(), "code": bcode}).inserted_id
+    list_user_id = ObjectId()
+    grant_board_role(list_board_id, list_user_id, "reporter")
     tickets.insert_one(
         {
             "_id": ObjectId(),
@@ -270,13 +308,13 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
         search=None,
         sort_by="created_at",
         sort_order="desc",
-        current_user={"_id": ObjectId(), "role": "super_admin"},
+        current_user={"_id": list_user_id, "role": "super_admin"},
     )
     assert "data" in res
 
     # summary empty
     summ = ticket_mod.get_tickets_summary(
-        current_user={"_id": ObjectId(), "role": "super_admin"}
+        current_user={"_id": list_user_id, "role": "super_admin"}
     )
     assert isinstance(summ, dict)
 
@@ -287,9 +325,18 @@ def test_ticket_get_update_summary_delete(monkeypatch, fake_collection):
         )
 
     # insert and delete success
-    td = tickets.insert_one({"_id": ObjectId(), "userId": str(ObjectId())}).inserted_id
+    delete_board_id = ObjectId()
+    delete_lead_id = ObjectId()
+    td = tickets.insert_one(
+        {
+            "_id": ObjectId(),
+            "board_id": str(delete_board_id),
+            "userId": str(ObjectId()),
+        }
+    ).inserted_id
+    grant_board_role(delete_board_id, delete_lead_id)
     resp3 = ticket_mod.delete_ticket(
-        str(td), current_user={"_id": ObjectId(), "role": "super_admin"}
+        str(td), current_user={"_id": delete_lead_id, "role": "super_admin"}
     )
     assert resp3["message"] == "Ticket deleted successfully"
 

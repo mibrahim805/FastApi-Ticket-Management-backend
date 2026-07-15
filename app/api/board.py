@@ -1,9 +1,16 @@
 from datetime import datetime, timezone
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
+from app.api.permissions import (
+    BOARD_LEAD_ROLES,
+    BOARD_MEMBER_ROLES,
+    BOARD_WORK_ROLES,
+    get_board_membership,
+    parse_object_id,
+    require_board_membership,
+)
 from app.db.db import (
     board_members_collection,
     boards_collection,
@@ -26,25 +33,38 @@ router = APIRouter(tags=["Boards"])
 @router.post("/boards")
 @super_admin_required
 def create_board(board: BoardCreate, current_user: dict = Depends(get_current_user)):
+    current_user_id = parse_object_id(current_user.get("_id"), "user_id")
     result = boards_collection.insert_one(board.model_dump())
 
-    current_user_id = current_user.get("_id")
-    if current_user_id:
-        board_members_collection.insert_one(
-            {
-                "board_id": result.inserted_id,
-                "user_id": current_user_id,
-                "role": BoardRole.LEAD.value,
-            }
-        )
+    board_members_collection.insert_one(
+        {
+            "board_id": result.inserted_id,
+            "user_id": current_user_id,
+            "role": BoardRole.LEAD.value,
+        }
+    )
 
     return {"id": str(result.inserted_id), "message": "Board created"}
 
 
 @router.get("/boards")
-@super_admin_required
 def get_boards(current_user: dict = Depends(get_current_user)):
-    boards = list(boards_collection.find())
+    user_id = parse_object_id(current_user.get("_id"), "user_id")
+    memberships = list(board_members_collection.find({"user_id": user_id}))
+
+    boards = []
+    seen_board_ids = set()
+    for membership in memberships:
+        if membership.get("role") not in BOARD_MEMBER_ROLES:
+            continue
+        board_id = membership.get("board_id")
+        if not board_id or board_id in seen_board_ids:
+            continue
+        board = boards_collection.find_one({"_id": board_id})
+        if board:
+            boards.append(board)
+            seen_board_ids.add(board_id)
+
     for board in boards:
         board["_id"] = str(board["_id"])
         ticket_count = ticket_collection.count_documents({"board_id": board["_id"]})
@@ -53,52 +73,73 @@ def get_boards(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/boards/{board_id}")
-# @super_admin_required
 def get_board(board_id: str, current_user: dict = Depends(get_current_user)):
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    if current_user["role"] != "super_admin" and board.get("assigned_agent") != str(
-        current_user["_id"]
-    ):
-        return {"message": "You have no access to view the board"}
+
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+    )
+
     board["_id"] = str(board["_id"])
     return {"board": board}
 
 
 @router.put("/boards/{board_id}")
-@super_admin_required
 def update_board(
     data: BoardCreate, board_id: str, current_user: dict = Depends(get_current_user)
 ):
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    boards_collection.update_one(
-        {"_id": ObjectId(board_id)}, {"$set": data.model_dump()}
+
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can update the board",
     )
+
+    boards_collection.update_one({"_id": board_object_id}, {"$set": data.model_dump()})
     return {"message": "Board updated"}
 
 
 @router.put("/board/{board_id}/assign", tags=["Tickets"])
-@super_admin_required
 def assign_board(
     board_id: str, data: AssignBoard, current_user: dict = Depends(get_current_user)
 ):
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    if (
-        board.get("assigned_agent")
-        and board["assigned_agent"] != data.agent_id
-        and current_user["role"] != "super_admin"
-    ):
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can assign the board",
+    )
+
+    target_membership = get_board_membership(
+        board_object_id,
+        data.agent_id,
+        board_members_collection,
+    )
+    if not target_membership or target_membership.get("role") not in BOARD_WORK_ROLES:
         raise HTTPException(
-            status_code=403, detail="Only super admin can reassign tickets"
+            status_code=400,
+            detail="Target user must be a lead or member of this board",
         )
+
     boards_collection.update_one(
-        {"_id": ObjectId(board_id)},
+        {"_id": board_object_id},
         {
             "$set": {
                 "assigned_agent": data.agent_id,
@@ -110,12 +151,22 @@ def assign_board(
 
 
 @router.delete("/boards/{board_id}")
-@super_admin_required
 def delete_board(board_id: str, current_user: dict = Depends(get_current_user)):
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    boards_collection.delete_one({"_id": ObjectId(board_id)})
+
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can delete the board",
+    )
+
+    boards_collection.delete_one({"_id": board_object_id})
+    board_members_collection.delete_many({"board_id": board_object_id})
     return {"message": "Board deleted"}
 
 
@@ -125,14 +176,18 @@ def assign_statuses_to_board(
     payload: BoardStatusAssign,
     current_user: dict = Depends(get_current_user),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="Only super_admin can assign statuses"
-        )
-
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can assign statuses",
+    )
 
     if len(payload.status_ids) < 2:
         raise HTTPException(
@@ -146,7 +201,9 @@ def assign_statuses_to_board(
 
     statuses = []
     for sid in payload.status_ids:
-        status = statuses_collection.find_one({"_id": ObjectId(sid)})
+        status = statuses_collection.find_one(
+            {"_id": parse_object_id(sid, "status_id")}
+        )
         if not status:
             raise HTTPException(status_code=404, detail=f"Status '{sid}' not found")
         statuses.append(status)
@@ -155,7 +212,7 @@ def assign_statuses_to_board(
     ordered_ids = [str(s["_id"]) for s in statuses]
 
     boards_collection.update_one(
-        {"_id": ObjectId(board_id)},
+        {"_id": board_object_id},
         {
             "$set": {
                 "assigned_statuses": ordered_ids,
@@ -182,38 +239,28 @@ def add_board_member(
     member: BoardMemberCreate,
     current_user: dict = Depends(get_current_user),
 ):
-
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    board_member = board_members_collection.find_one(
-        {
-            "board_id": ObjectId(board_id),
-            "user_id": current_user["_id"],
-        }
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can add members",
     )
 
-    if not board_member:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not a member of this board",
-        )
-
-    if board_member["role"] != BoardRole.LEAD.value:
-        raise HTTPException(
-            status_code=403,
-            detail="Only board leads can add members",
-        )
-
-    user = user_collection.find_one({"_id": ObjectId(member.user_id)})
+    member_user_id = parse_object_id(member.user_id, "user_id")
+    user = user_collection.find_one({"_id": member_user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     existing_member = board_members_collection.find_one(
         {
-            "board_id": ObjectId(board_id),
-            "user_id": ObjectId(member.user_id),
+            "board_id": board_object_id,
+            "user_id": member_user_id,
         }
     )
 
@@ -225,8 +272,8 @@ def add_board_member(
 
     result = board_members_collection.insert_one(
         {
-            "board_id": ObjectId(board_id),
-            "user_id": ObjectId(member.user_id),
+            "board_id": board_object_id,
+            "user_id": member_user_id,
             "role": member.role.value,
         }
     )
@@ -242,27 +289,20 @@ def get_board_members(
     board_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-
-    board = boards_collection.find_one({"_id": ObjectId(board_id)})
+    board_object_id = parse_object_id(board_id, "board_id")
+    board = boards_collection.find_one({"_id": board_object_id})
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    membership = board_members_collection.find_one(
-        {
-            "board_id": ObjectId(board_id),
-            "user_id": current_user["_id"],
-        }
+    require_board_membership(
+        board_object_id,
+        current_user,
+        board_members_collection,
     )
-
-    if not membership:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not a member of this board",
-        )
 
     members = []
 
-    for member in board_members_collection.find({"board_id": ObjectId(board_id)}):
+    for member in board_members_collection.find({"board_id": board_object_id}):
         user = user_collection.find_one(
             {"_id": member["user_id"]},
             {

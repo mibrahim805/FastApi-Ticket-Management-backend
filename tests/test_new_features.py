@@ -192,27 +192,48 @@ class TestReopenTicket:
 
         assert exc_info.value.status_code == 404
 
-    def test_reopen_ticket_unauthorized(self, monkeypatch, fake_collection):
+    def test_reopen_ticket_unauthorized(
+        self, monkeypatch, fake_collection, grant_board_role
+    ):
         ticket_id = ObjectId()
+        board_id = ObjectId()
+        member_id = ObjectId()
         tickets = fake_collection.__class__(
-            [{"_id": ticket_id, "current_status_name": "closed"}]
+            [
+                {
+                    "_id": ticket_id,
+                    "board_id": str(board_id),
+                    "current_status_name": "closed",
+                }
+            ]
         )
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
+        grant_board_role(board_id, member_id, "member")
 
         with pytest.raises(HTTPException) as exc_info:
             ticket_mod.reopen_ticket(
-                str(ticket_id), current_user={"_id": ObjectId(), "role": "agent"}
+                str(ticket_id), current_user={"_id": member_id, "role": "agent"}
             )
 
         assert exc_info.value.status_code == 403
 
-    def test_reopen_ticket_invalid_status(self, monkeypatch, fake_collection):
+    def test_reopen_ticket_invalid_status(
+        self, monkeypatch, fake_collection, grant_board_role
+    ):
         ticket_id = ObjectId()
+        board_id = ObjectId()
         admin_id = ObjectId()
         tickets = fake_collection.__class__(
-            [{"_id": ticket_id, "current_status_name": "open"}]
+            [
+                {
+                    "_id": ticket_id,
+                    "board_id": str(board_id),
+                    "current_status_name": "open",
+                }
+            ]
         )
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
+        grant_board_role(board_id, admin_id)
 
         with pytest.raises(HTTPException) as exc_info:
             ticket_mod.reopen_ticket(
@@ -226,14 +247,16 @@ class TestAssignBeforeInProgress:
     """Test validation that tickets must be assigned before moving to IN_PROGRESS"""
 
     def test_update_to_in_progress_without_assignment_fails(
-        self, monkeypatch, fake_collection
+        self, monkeypatch, fake_collection, grant_board_role
     ):
         ticket_id = ObjectId()
+        board_id = ObjectId()
         user_id = ObjectId()
         tickets = fake_collection.__class__(
             [
                 {
                     "_id": ticket_id,
+                    "board_id": str(board_id),
                     "userId": str(user_id),
                     "title": "Test",
                     "assigned_agent": None,
@@ -245,6 +268,7 @@ class TestAssignBeforeInProgress:
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
         monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
         monkeypatch.setattr(ticket_mod, "log_activity", lambda **kwargs: None)
+        grant_board_role(board_id, user_id, "member")
 
         upd = TicketUpdate(
             status="in_progress", priority="high", category="bug", assigned_to="agent"
@@ -259,15 +283,17 @@ class TestAssignBeforeInProgress:
         assert "assigned" in exc_info.value.detail.lower()
 
     def test_update_to_in_progress_with_assignment_succeeds(
-        self, monkeypatch, fake_collection
+        self, monkeypatch, fake_collection, grant_board_role
     ):
         ticket_id = ObjectId()
+        board_id = ObjectId()
         user_id = ObjectId()
         agent_id = ObjectId()
         tickets = fake_collection.__class__(
             [
                 {
                     "_id": ticket_id,
+                    "board_id": str(board_id),
                     "userId": str(user_id),
                     "title": "Test",
                     "assigned_agent": str(agent_id),
@@ -279,6 +305,7 @@ class TestAssignBeforeInProgress:
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
         monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
         monkeypatch.setattr(ticket_mod, "log_activity", lambda **kwargs: None)
+        grant_board_role(board_id, user_id, "member")
 
         upd = TicketUpdate(
             status="in_progress", priority="high", category="bug", assigned_to="agent"
