@@ -44,16 +44,16 @@ def test_calculate_due_date_invalid_priority():
 
 
 def test_create_ticket_assigns_first_status_and_updates_counter(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     status_id = ObjectId()
     current_user = {"_id": ObjectId(), "role": "agent"}
 
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "code": "SUP",
                 "assigned_agent": str(current_user["_id"]),
                 "assigned_statuses": [str(status_id)],
@@ -66,17 +66,17 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
     notifications = fake_collection.__class__()
     counters = fake_collection.__class__()
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
     monkeypatch.setattr(ticket, "counters_collection", counters)
     monkeypatch.setattr(ticket, "log_activity", lambda **kwargs: None)
     monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
-    grant_board_role(board_id, current_user["_id"], "member")
+    grant_project_role(project_id, current_user["_id"], "member")
 
     payload = TicketCreate(
-        board_id=str(board_id),
+        project_id=str(project_id),
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -92,12 +92,12 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
     assert len(notifications.documents) == 1
 
 
-def test_create_ticket_rejects_missing_board(monkeypatch, fake_collection):
-    monkeypatch.setattr(ticket, "boards_collection", fake_collection)
+def test_create_ticket_rejects_missing_project(monkeypatch, fake_collection):
+    monkeypatch.setattr(ticket, "projects_collection", fake_collection)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
 
     payload = TicketCreate(
-        board_id=str(ObjectId()),
+        project_id=str(ObjectId()),
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -110,27 +110,27 @@ def test_create_ticket_rejects_missing_board(monkeypatch, fake_collection):
     assert exc_info.value.status_code == 404
 
 
-def test_create_ticket_rejects_board_with_no_statuses(
-    monkeypatch, fake_collection, grant_board_role
+def test_create_ticket_rejects_project_with_no_statuses(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
-    boards = fake_collection.__class__(
+    project_id = ObjectId()
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "code": "SUP",
                 "assigned_agent": str(ObjectId()),
                 "assigned_statuses": [],
             }
         ]
     )
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
     user_id = ObjectId()
-    grant_board_role(board_id, user_id, "reporter")
+    grant_project_role(project_id, user_id, "reporter")
 
     payload = TicketCreate(
-        board_id=str(board_id),
+        project_id=str(project_id),
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -146,27 +146,27 @@ def test_create_ticket_rejects_board_with_no_statuses(
 
 
 def test_create_ticket_rejects_missing_first_status(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     missing_status_id = ObjectId()
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "code": "SUP",
                 "assigned_agent": str(ObjectId()),
                 "assigned_statuses": [str(missing_status_id)],
             }
         ]
     )
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
     user_id = ObjectId()
-    grant_board_role(board_id, user_id, "reporter")
+    grant_project_role(project_id, user_id, "reporter")
 
     payload = TicketCreate(
-        board_id=str(board_id),
+        project_id=str(project_id),
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -181,12 +181,12 @@ def test_create_ticket_rejects_missing_first_status(
     assert exc_info.value.status_code == 400
 
 
-def test_create_ticket_rejects_invalid_board_id(monkeypatch, fake_collection):
-    monkeypatch.setattr(ticket, "boards_collection", fake_collection)
+def test_create_ticket_rejects_invalid_project_id(monkeypatch, fake_collection):
+    monkeypatch.setattr(ticket, "projects_collection", fake_collection)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
 
     payload = TicketCreate(
-        board_id="invalid-board-id",
+        project_id="invalid-project-id",
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -199,15 +199,15 @@ def test_create_ticket_rejects_invalid_board_id(monkeypatch, fake_collection):
     assert exc_info.value.status_code == 400
 
 
-def test_create_ticket_allows_any_board_member(
-    monkeypatch, fake_collection, grant_board_role
+def test_create_ticket_allows_any_project_member(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     status_id = ObjectId()
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "code": "SUP",
                 "assigned_agent": str(ObjectId()),
                 "assigned_statuses": [str(status_id)],
@@ -219,7 +219,7 @@ def test_create_ticket_allows_any_board_member(
     notifications = fake_collection.__class__()
     counters = fake_collection.__class__()
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
@@ -227,10 +227,10 @@ def test_create_ticket_allows_any_board_member(
     monkeypatch.setattr(ticket, "log_activity", lambda **kwargs: None)
     monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
     reporter_id = ObjectId()
-    grant_board_role(board_id, reporter_id, "reporter")
+    grant_project_role(project_id, reporter_id, "reporter")
 
     payload = TicketCreate(
-        board_id=str(board_id),
+        project_id=str(project_id),
         title="Printer issue",
         description="Printer is offline",
         category=Category.SUPPORT,
@@ -246,19 +246,20 @@ def test_create_ticket_allows_any_board_member(
 
 
 def test_get_tickets_includes_tickets_assigned_to_current_user(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_code = "SUPPORT"
+    project_key = "SUPPORT"
     current_user_id = ObjectId()
     other_user_id = ObjectId()
 
-    board_id = ObjectId()
-    boards = fake_collection.__class__([{"_id": board_id, "code": board_code}])
+    project_id = ObjectId()
+    projects = fake_collection.__class__([{"_id": project_id, "code": project_key}])
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ObjectId(),
-                "board_code": board_code,
+                "project_id": str(project_id),
+                "project_key": project_key,
                 "ticket_code": "TKT-1",
                 "userId": str(current_user_id),
                 "assigned_agent": None,
@@ -267,7 +268,8 @@ def test_get_tickets_includes_tickets_assigned_to_current_user(
             },
             {
                 "_id": ObjectId(),
-                "board_code": board_code,
+                "project_id": str(project_id),
+                "project_key": project_key,
                 "ticket_code": "TKT-2",
                 "userId": str(other_user_id),
                 "assigned_agent": str(current_user_id),
@@ -276,7 +278,8 @@ def test_get_tickets_includes_tickets_assigned_to_current_user(
             },
             {
                 "_id": ObjectId(),
-                "board_code": board_code,
+                "project_id": str(project_id),
+                "project_key": project_key,
                 "ticket_code": "TKT-3",
                 "userId": str(other_user_id),
                 "assigned_agent": str(other_user_id),
@@ -286,12 +289,12 @@ def test_get_tickets_includes_tickets_assigned_to_current_user(
         ]
     )
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_board_role(board_id, current_user_id, "member")
+    grant_project_role(project_id, current_user_id, "member")
 
     response = ticket.get_tickets(
-        board_code,
+        project_key,
         page=1,
         page_size=10,
         status=None,
@@ -311,18 +314,19 @@ def test_get_tickets_includes_tickets_assigned_to_current_user(
 
 
 def test_get_tickets_handles_naive_due_date(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_code = "SUPPORT"
+    project_key = "SUPPORT"
     current_user_id = ObjectId()
 
-    board_id = ObjectId()
-    boards = fake_collection.__class__([{"_id": board_id, "code": board_code}])
+    project_id = ObjectId()
+    projects = fake_collection.__class__([{"_id": project_id, "code": project_key}])
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ObjectId(),
-                "board_code": board_code,
+                "project_id": str(project_id),
+                "project_key": project_key,
                 "ticket_code": "TKT-1",
                 "userId": str(current_user_id),
                 "assigned_agent": None,
@@ -334,12 +338,12 @@ def test_get_tickets_handles_naive_due_date(
         ]
     )
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_board_role(board_id, current_user_id, "member")
+    grant_project_role(project_id, current_user_id, "member")
 
     response = ticket.get_tickets(
-        board_code,
+        project_key,
         page=1,
         page_size=10,
         status=None,
@@ -357,19 +361,19 @@ def test_get_tickets_handles_naive_due_date(
 
 
 def test_move_ticket_forward_advances_status(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     open_id = ObjectId()
     progress_id = ObjectId()
     closed_id = ObjectId()
     ticket_id = ObjectId()
     current_user = {"_id": ObjectId(), "role": "agent"}
 
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "assigned_statuses": [str(open_id), str(progress_id), str(closed_id)],
             }
         ]
@@ -383,7 +387,7 @@ def test_move_ticket_forward_advances_status(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(current_user["_id"]),
                 "ticket_code": "SUP-3",
                 "current_status_id": str(open_id),
@@ -392,10 +396,10 @@ def test_move_ticket_forward_advances_status(
         ]
     )
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_board_role(board_id, current_user["_id"], "member")
+    grant_project_role(project_id, current_user["_id"], "member")
 
     response = ticket.move_ticket_forward(str(ticket_id), current_user=current_user)
 
@@ -405,12 +409,12 @@ def test_move_ticket_forward_advances_status(
 
 
 def test_move_ticket_status_updates_id_and_name_from_status_id(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     old_status_id = ObjectId()
     target_status_id = ObjectId()
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     current_user = {"_id": ObjectId(), "role": "agent"}
 
     statuses = fake_collection.__class__([{"_id": target_status_id, "name": "Done"}])
@@ -418,7 +422,7 @@ def test_move_ticket_status_updates_id_and_name_from_status_id(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(current_user["_id"]),
                 "ticket_code": "SUP-4",
                 "current_status_id": str(old_status_id),
@@ -428,10 +432,10 @@ def test_move_ticket_status_updates_id_and_name_from_status_id(
             }
         ]
     )
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "assigned_statuses": [str(old_status_id), str(target_status_id)],
             }
         ]
@@ -439,8 +443,8 @@ def test_move_ticket_status_updates_id_and_name_from_status_id(
 
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "boards_collection", boards)
-    grant_board_role(board_id, current_user["_id"], "member")
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    grant_project_role(project_id, current_user["_id"], "member")
 
     response = ticket.move_ticket_status(
         str(ticket_id),
@@ -460,12 +464,12 @@ def test_move_ticket_status_updates_id_and_name_from_status_id(
 
 
 def test_move_ticket_status_updates_id_and_name_from_status_name(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     old_status_id = ObjectId()
     target_status_id = ObjectId()
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
 
     statuses = fake_collection.__class__(
@@ -475,16 +479,16 @@ def test_move_ticket_status_updates_id_and_name_from_status_name(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "current_status_id": str(old_status_id),
                 "current_status_name": "QA Failed",
             }
         ]
     )
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "assigned_statuses": [str(old_status_id), str(target_status_id)],
             }
         ]
@@ -492,8 +496,8 @@ def test_move_ticket_status_updates_id_and_name_from_status_name(
 
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "boards_collection", boards)
-    grant_board_role(board_id, user_id, "member")
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    grant_project_role(project_id, user_id, "member")
 
     response = ticket.move_ticket_status(
         str(ticket_id),
@@ -507,17 +511,17 @@ def test_move_ticket_status_updates_id_and_name_from_status_name(
 
 
 def test_move_ticket_status_rejects_missing_target_status(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
 
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "current_status_id": str(ObjectId()),
             }
         ]
@@ -527,10 +531,10 @@ def test_move_ticket_status_rejects_missing_target_status(
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(
         ticket,
-        "boards_collection",
-        fake_collection.__class__([{"_id": board_id, "assigned_statuses": []}]),
+        "projects_collection",
+        fake_collection.__class__([{"_id": project_id, "assigned_statuses": []}]),
     )
-    grant_board_role(board_id, user_id, "member")
+    grant_project_role(project_id, user_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.move_ticket_status(
@@ -543,18 +547,18 @@ def test_move_ticket_status_rejects_missing_target_status(
 
 
 def test_move_ticket_forward_rejects_last_status(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     open_id = ObjectId()
     progress_id = ObjectId()
     ticket_id = ObjectId()
     current_user = {"_id": ObjectId(), "role": "agent"}
 
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "assigned_statuses": [str(open_id), str(progress_id)],
             }
         ]
@@ -563,7 +567,7 @@ def test_move_ticket_forward_rejects_last_status(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(current_user["_id"]),
                 "ticket_code": "SUP-3",
                 "current_status_id": str(progress_id),
@@ -572,10 +576,10 @@ def test_move_ticket_forward_rejects_last_status(
         ]
     )
 
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_board_role(board_id, current_user["_id"], "member")
+    grant_project_role(project_id, current_user["_id"], "member")
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.move_ticket_forward(str(ticket_id), current_user=current_user)
@@ -605,17 +609,17 @@ def test_move_ticket_forward_rejects_invalid_ticket_id(monkeypatch, fake_collect
     assert exc_info.value.status_code == 400
 
 
-def test_move_ticket_forward_rejects_board_not_found(
-    monkeypatch, fake_collection, grant_board_role
+def test_move_ticket_forward_rejects_project_not_found(
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(ObjectId()),
                 "ticket_code": "SUP-3",
                 "current_status_id": str(ObjectId()),
@@ -624,8 +628,8 @@ def test_move_ticket_forward_rejects_board_not_found(
         ]
     )
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "boards_collection", fake_collection.__class__())
-    grant_board_role(board_id, user_id, "member")
+    monkeypatch.setattr(ticket, "projects_collection", fake_collection.__class__())
+    grant_project_role(project_id, user_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.move_ticket_forward(
@@ -635,17 +639,17 @@ def test_move_ticket_forward_rejects_board_not_found(
     assert exc_info.value.status_code == 404
 
 
-def test_move_ticket_forward_rejects_status_not_in_board(
-    monkeypatch, fake_collection, grant_board_role
+def test_move_ticket_forward_rejects_status_not_in_project(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     ticket_id = ObjectId()
     user_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(ObjectId()),
                 "ticket_code": "SUP-3",
                 "current_status_id": str(ObjectId()),
@@ -653,12 +657,12 @@ def test_move_ticket_forward_rejects_status_not_in_board(
             }
         ]
     )
-    boards = fake_collection.__class__(
-        [{"_id": board_id, "assigned_statuses": [str(ObjectId()), str(ObjectId())]}]
+    projects = fake_collection.__class__(
+        [{"_id": project_id, "assigned_statuses": [str(ObjectId()), str(ObjectId())]}]
     )
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "boards_collection", boards)
-    grant_board_role(board_id, user_id, "member")
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    grant_project_role(project_id, user_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.move_ticket_forward(
@@ -669,9 +673,9 @@ def test_move_ticket_forward_rejects_status_not_in_board(
 
 
 def test_move_ticket_forward_rejects_missing_next_status(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     current_status = ObjectId()
     next_status = ObjectId()
     ticket_id = ObjectId()
@@ -680,7 +684,7 @@ def test_move_ticket_forward_rejects_missing_next_status(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "userId": str(ObjectId()),
                 "ticket_code": "SUP-3",
                 "current_status_id": str(current_status),
@@ -688,10 +692,10 @@ def test_move_ticket_forward_rejects_missing_next_status(
             }
         ]
     )
-    boards = fake_collection.__class__(
+    projects = fake_collection.__class__(
         [
             {
-                "_id": board_id,
+                "_id": project_id,
                 "assigned_statuses": [
                     str(current_status),
                     str(next_status),
@@ -701,9 +705,9 @@ def test_move_ticket_forward_rejects_missing_next_status(
         ]
     )
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "boards_collection", boards)
+    monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
-    grant_board_role(board_id, user_id, "member")
+    grant_project_role(project_id, user_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.move_ticket_forward(
@@ -714,16 +718,16 @@ def test_move_ticket_forward_rejects_missing_next_status(
 
 
 def test_assign_ticket_allows_project_member_self_assign(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     agent_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "assigned_agent": None,
                 "userId": "user",
             }
@@ -736,7 +740,7 @@ def test_assign_ticket_allows_project_member_self_assign(
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", users)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
-    grant_board_role(board_id, agent_id, "member")
+    grant_project_role(project_id, agent_id, "member")
 
     response = ticket.assign_ticket(
         str(ticket_id),
@@ -749,16 +753,16 @@ def test_assign_ticket_allows_project_member_self_assign(
     assert len(notifications.documents) == 1
 
 
-def test_assign_ticket_succeeds(monkeypatch, fake_collection, grant_board_role):
+def test_assign_ticket_succeeds(monkeypatch, fake_collection, grant_project_role):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     agent_id = ObjectId()
     lead_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "assigned_agent": None,
                 "userId": "user",
             }
@@ -771,8 +775,8 @@ def test_assign_ticket_succeeds(monkeypatch, fake_collection, grant_board_role):
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", users)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
-    grant_board_role(board_id, lead_id)
-    grant_board_role(board_id, agent_id, "member")
+    grant_project_role(project_id, lead_id)
+    grant_project_role(project_id, agent_id, "member")
 
     response = ticket.assign_ticket(
         str(ticket_id),
@@ -800,16 +804,16 @@ def test_assign_ticket_rejects_missing_ticket(monkeypatch, fake_collection):
 
 
 def test_assign_ticket_rejects_missing_agent(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     lead_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "assigned_agent": None,
                 "userId": "user",
             }
@@ -817,7 +821,7 @@ def test_assign_ticket_rejects_missing_agent(
     )
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", fake_collection.__class__())
-    grant_board_role(board_id, lead_id)
+    grant_project_role(project_id, lead_id)
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.assign_ticket(
@@ -829,18 +833,18 @@ def test_assign_ticket_rejects_missing_agent(
     assert exc_info.value.status_code == 404
 
 
-def test_assign_ticket_rejects_target_user_without_working_board_role(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_ticket_rejects_target_user_without_working_project_role(
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
     lead_id = ObjectId()
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "assigned_agent": None,
                 "userId": "user",
             }
@@ -851,7 +855,7 @@ def test_assign_ticket_rejects_target_user_without_working_board_role(
     )
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", users)
-    grant_board_role(board_id, lead_id)
+    grant_project_role(project_id, lead_id)
 
     with pytest.raises(HTTPException) as exc_info:
         ticket.assign_ticket(
@@ -863,11 +867,11 @@ def test_assign_ticket_rejects_target_user_without_working_board_role(
     assert exc_info.value.status_code == 400
 
 
-def test_assign_ticket_allows_board_lead_reassignment(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_ticket_allows_project_lead_reassignment(
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = ObjectId()
-    board_id = ObjectId()
+    project_id = ObjectId()
     old_agent_id = ObjectId()
     new_agent_id = ObjectId()
     admin_id = ObjectId()
@@ -875,7 +879,7 @@ def test_assign_ticket_allows_board_lead_reassignment(
         [
             {
                 "_id": ticket_id,
-                "board_id": str(board_id),
+                "project_id": str(project_id),
                 "assigned_agent": str(old_agent_id),
                 "userId": "user",
             }
@@ -891,8 +895,8 @@ def test_assign_ticket_allows_board_lead_reassignment(
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
     monkeypatch.setattr(ticket, "user_collection", users)
     monkeypatch.setattr(ticket, "notifications_collection", notifications)
-    grant_board_role(board_id, admin_id)
-    grant_board_role(board_id, new_agent_id, "member")
+    grant_project_role(project_id, admin_id)
+    grant_project_role(project_id, new_agent_id, "member")
 
     response = ticket.assign_ticket(
         str(ticket_id),

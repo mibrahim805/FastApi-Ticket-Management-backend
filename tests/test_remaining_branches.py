@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from jose import JWTError
 
 from app.api import activity, auth
-from app.api import board as board_mod
+from app.api import project as project_mod
 from app.api import status as status_mod
 from app.api import ticket as ticket_mod
 from app.models.status import StatusCreate, StatusUpdate
@@ -24,14 +24,14 @@ def test_activity_get_ticket_activity_not_found(monkeypatch, fake_collection):
 
 
 def test_activity_get_ticket_activity_success(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     ticket_id = str(ObjectId())
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
     t = {
         "_id": ObjectId(ticket_id),
-        "board_id": str(board_id),
+        "project_id": str(project_id),
         "ticket_code": "T-1",
     }
     tickets = fake_collection.__class__([t])
@@ -46,7 +46,7 @@ def test_activity_get_ticket_activity_success(
     )
     monkeypatch.setattr(activity, "ticket_collection", tickets)
     monkeypatch.setattr(activity, "ticket_activity_collection", acts)
-    grant_board_role(board_id, user_id, "reporter")
+    grant_project_role(project_id, user_id, "reporter")
 
     resp = activity.get_ticket_activity(
         ticket_id, current_user={"_id": user_id, "role": "customer"}
@@ -87,9 +87,9 @@ def test_get_current_user_user_not_found(monkeypatch, fake_collection):
 
 def test_status_create_and_update_and_delete(monkeypatch, fake_collection):
     statuses = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     monkeypatch.setattr(status_mod, "statuses_collection", statuses)
-    monkeypatch.setattr(status_mod, "boards_collection", boards)
+    monkeypatch.setattr(status_mod, "projects_collection", projects)
 
     # create
     resp = status_mod.create_status(
@@ -135,61 +135,61 @@ def test_status_create_and_update_and_delete(monkeypatch, fake_collection):
     )
     assert resp2["message"] == "Status updated successfully"
 
-    # delete: assigned to board
-    boards.insert_one({"assigned_statuses": str(sid)}).inserted_id
+    # delete: assigned to project
+    projects.insert_one({"assigned_statuses": str(sid)}).inserted_id
     with pytest.raises(HTTPException):
         status_mod.delete_status(str(sid), current_user={"role": "super_admin"})
 
     # remove assignment and delete
-    boards.documents = []
+    projects.documents = []
     resp3 = status_mod.delete_status(str(sid), current_user={"role": "super_admin"})
     assert resp3["message"] == "Status deleted successfully"
 
 
-def test_board_get_update_delete(monkeypatch, fake_collection, grant_board_role):
-    boards = fake_collection.__class__()
+def test_project_get_update_delete(monkeypatch, fake_collection, grant_project_role):
+    projects = fake_collection.__class__()
     tickets = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-    monkeypatch.setattr(board_mod, "ticket_collection", tickets)
+    monkeypatch.setattr(project_mod, "projects_collection", projects)
+    monkeypatch.setattr(project_mod, "ticket_collection", tickets)
 
     # create
-    from app.models.board import BoardCreate
+    from app.models.project import ProjectCreate
 
     super_admin_id = ObjectId()
-    resp = board_mod.create_board(
-        BoardCreate(name="B", code="BC"),
+    resp = project_mod.create_project(
+        ProjectCreate(name="B", code="BC"),
         current_user={"_id": super_admin_id, "role": "super_admin"},
     )
     assert "id" in resp
 
-    # get_boards
-    boards.documents.append({"_id": ObjectId(), "code": "C1"})
-    gb = board_mod.get_boards(
+    # get_projects
+    projects.documents.append({"_id": ObjectId(), "code": "C1"})
+    gb = project_mod.get_projects(
         current_user={"_id": super_admin_id, "role": "super_admin"}
     )
-    assert "boards" in gb
+    assert "projects" in gb
 
-    # get_board not found
+    # get_project not found
     with pytest.raises(HTTPException):
-        board_mod.get_board(
+        project_mod.get_project(
             str(ObjectId()), current_user={"_id": ObjectId(), "role": "super_admin"}
         )
 
     # insert and unauthorized view (assigned_agent mismatch)
     different_agent_id = ObjectId()
-    boards.insert_one(
+    projects.insert_one(
         {"_id": ObjectId(), "assigned_agent": str(different_agent_id)}
     ).inserted_id
     with pytest.raises(HTTPException) as exc_info:
-        board_mod.get_board(
-            str(boards.documents[-1]["_id"]),
+        project_mod.get_project(
+            str(projects.documents[-1]["_id"]),
             current_user={"_id": ObjectId(), "role": "agent"},
         )
     assert exc_info.value.status_code == 403
 
     # update
     with pytest.raises(HTTPException):
-        board_mod.update_board(
+        project_mod.update_project(
             {"name": "X"},
             str(ObjectId()),
             current_user={"_id": super_admin_id, "role": "super_admin"},
@@ -197,26 +197,26 @@ def test_board_get_update_delete(monkeypatch, fake_collection, grant_board_role)
 
     # delete not found
     with pytest.raises(HTTPException):
-        board_mod.delete_board(
+        project_mod.delete_project(
             str(ObjectId()),
             current_user={"_id": super_admin_id, "role": "super_admin"},
         )
 
 
 def test_ticket_get_update_summary_delete(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     statuses = fake_collection.__class__()
     users = fake_collection.__class__()
 
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "comments_collection", comments)
     monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
-    monkeypatch.setattr(ticket_mod, "boards_collection", boards)
+    monkeypatch.setattr(ticket_mod, "projects_collection", projects)
     monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
     monkeypatch.setattr(ticket_mod, "user_collection", users)
     monkeypatch.setattr(ticket_mod, "log_activity", lambda **k: None)
@@ -228,11 +228,11 @@ def test_ticket_get_update_summary_delete(
         )
 
     # insert ticket and comments and get details unauthorized
-    detail_board_id = ObjectId()
+    detail_project_id = ObjectId()
     tid = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(detail_board_id),
+            "project_id": str(detail_project_id),
             "userId": str(ObjectId()),
         }
     ).inserted_id
@@ -243,7 +243,7 @@ def test_ticket_get_update_summary_delete(
 
     # now as super_admin
     detail_admin_id = ObjectId()
-    grant_board_role(detail_board_id, detail_admin_id, "reporter")
+    grant_project_role(detail_project_id, detail_admin_id, "reporter")
     resp = ticket_mod.get_ticket_details(
         current_user={"_id": detail_admin_id, "role": "super_admin"},
         ticket_id=str(tid),
@@ -253,11 +253,11 @@ def test_ticket_get_update_summary_delete(
     # update ticket
     # create ticket with fields
     t_owner = ObjectId()
-    update_board_id = ObjectId()
+    update_project_id = ObjectId()
     tid2 = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(update_board_id),
+            "project_id": str(update_project_id),
             "userId": str(t_owner),
             "title": "T",
             "description": "D",
@@ -270,27 +270,30 @@ def test_ticket_get_update_summary_delete(
     upd = TicketUpdate(
         status="in_progress", priority="high", category="bug", assigned_to="agent"
     )
-    grant_board_role(update_board_id, t_owner, "member")
+    grant_project_role(update_project_id, t_owner, "member")
     resp2 = ticket_mod.update_ticket(
         str(tid2), upd, current_user={"_id": t_owner, "role": "agent"}
     )
     assert resp2["message"] == "Ticket updated successfully"
 
-    # get_tickets with board not found
+    # get_tickets with project not found
     with pytest.raises(HTTPException):
         ticket_mod.get_tickets(
-            "NOBOARD", current_user={"_id": ObjectId(), "role": "agent"}
+            "NOPROJECT", current_user={"_id": ObjectId(), "role": "agent"}
         )
 
-    # create board and tickets and test pagination and filters
-    bcode = "BC"
-    list_board_id = boards.insert_one({"_id": ObjectId(), "code": bcode}).inserted_id
+    # create project and tickets and test pagination and filters
+    project_key = "BC"
+    list_project_id = projects.insert_one(
+        {"_id": ObjectId(), "code": project_key}
+    ).inserted_id
     list_user_id = ObjectId()
-    grant_board_role(list_board_id, list_user_id, "reporter")
+    grant_project_role(list_project_id, list_user_id, "reporter")
     tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_code": bcode,
+            "project_id": str(list_project_id),
+            "project_key": project_key,
             "createdAt": datetime.now(),
             "priorityOrder": 1,
             "dueDate": datetime.now(),
@@ -298,7 +301,7 @@ def test_ticket_get_update_summary_delete(
         }
     )
     res = ticket_mod.get_tickets(
-        bcode,
+        project_key,
         page=1,
         page_size=1,
         status=None,
@@ -325,16 +328,16 @@ def test_ticket_get_update_summary_delete(
         )
 
     # insert and delete success
-    delete_board_id = ObjectId()
+    delete_project_id = ObjectId()
     delete_lead_id = ObjectId()
     td = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(delete_board_id),
+            "project_id": str(delete_project_id),
             "userId": str(ObjectId()),
         }
     ).inserted_id
-    grant_board_role(delete_board_id, delete_lead_id)
+    grant_project_role(delete_project_id, delete_lead_id)
     resp3 = ticket_mod.delete_ticket(
         str(td), current_user={"_id": delete_lead_id, "role": "super_admin"}
     )

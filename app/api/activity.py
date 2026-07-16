@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.auth import get_current_user
 from app.api.permissions import parse_object_id, require_ticket_membership
 from app.db.db import (
-    board_members_collection,
+    project_members_collection,
     ticket_activity_collection,
     ticket_collection,
 )
@@ -44,7 +44,7 @@ def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user)):
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
 
     activities = list(

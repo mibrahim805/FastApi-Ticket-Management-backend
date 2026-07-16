@@ -1,6 +1,6 @@
 # 🎫 Ticket Management System API
 
-A production-style Ticket Management System built with **FastAPI** and **MongoDB**. The project provides authentication, role-based authorization, board management, ticket management, comments, notifications, and customizable workflows.
+A production-style Ticket Management System built with **FastAPI** and **MongoDB**. The application provides authentication, role-based authorization, project management, ticket management, comments, notifications, and customizable workflows.
 
 ---
 
@@ -27,19 +27,21 @@ Role-based authorization is implemented to restrict access to sensitive operatio
 
 ---
 
-## Board Management
+## Project Management
 
-- Create Board
-- Update Board
-- Delete Board
-- Get Board
-- List Boards
+- Create Project
+- Update Project
+- Delete Project
+- Get Project
+- List Projects
+- Manage Project Members
+- Configure Project Workflows
 
-Each board contains:
+Each project contains:
 
-- Title
-- Code
-- Ticket Counter
+- Name
+- A unique 2–10 character uppercase key
+- An independent ticket number sequence
 - Assigned Status Workflow
 
 Example:
@@ -59,7 +61,7 @@ OMS-3
 
 ## Status Management
 
-Global statuses can be created and assigned to boards.
+Global statuses can be created and assigned to projects.
 
 Example Workflow:
 
@@ -76,7 +78,8 @@ Resolved
 Closed
 ```
 
-Each board can have its own workflow.
+Each project can have its own workflow. A super admin or the project's lead can
+configure the project, its members, and its assigned statuses.
 
 ---
 
@@ -101,7 +104,7 @@ Each ticket contains:
 - Category
 - Priority
 - Current Status
-- Board
+- Project
 - Assigned Agent
 - Created By
 - Due Date
@@ -175,7 +178,7 @@ app/
 ├── api/
 │   ├── auth.py
 │   ├── users.py
-│   ├── boards.py
+│   ├── project.py
 │   ├── tickets.py
 │   ├── status.py
 │   ├── comments.py
@@ -247,15 +250,18 @@ Authorization: Bearer <your_token>
 
 ---
 
-## Boards
+## Projects
 
 | Method | Endpoint |
 |---------|----------|
-| POST | /boards |
-| GET | /boards |
-| GET | /boards/{id} |
-| PUT | /boards/{id} |
-| DELETE | /boards/{id} |
+| POST | /projects |
+| GET | /projects |
+| GET | /projects/{project_id} |
+| PUT | /projects/{project_id} |
+| DELETE | /projects/{project_id} |
+| PATCH | /projects/{project_id}/statuses |
+| POST | /projects/{project_id}/members |
+| GET | /projects/{project_id}/members |
 
 ---
 
@@ -305,7 +311,9 @@ Authorization: Bearer <your_token>
 ```
 users
 
-boards
+projects
+
+project_members
 
 statuses
 
@@ -315,6 +323,12 @@ comments
 
 notifications
 ```
+
+Projects are stored in `projects`, memberships in `project_members`, and tickets
+reference their project using `project_id` and `project_key`.
+
+This is a breaking storage-schema change for databases created by earlier
+versions. Migrate existing collections and reference fields before deployment.
 
 ---
 
@@ -411,7 +425,7 @@ Super Admin
 
 ↓
 
-Creates Board
+Creates Project
 
 ↓
 

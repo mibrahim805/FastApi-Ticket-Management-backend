@@ -10,6 +10,5 @@ class ProjectRole(str, Enum):
 
 
 class ProjectMemberCreate(BaseModel):
-    project_id: str
     user_id: str
     role: ProjectRole = ProjectRole.MEMBER

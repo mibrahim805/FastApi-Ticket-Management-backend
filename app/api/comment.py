@@ -3,9 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.auth import get_current_user
 from app.api.permissions import parse_object_id, require_ticket_membership
 from app.db.db import (
-    board_members_collection,
     comments_collection,
     notifications_collection,
+    project_members_collection,
     ticket_collection,
 )
 from app.models.comment import Comment
@@ -28,7 +28,7 @@ def create_comment(
     membership = require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
     if (
         membership.get("role") == ProjectRole.REPORTER.value
@@ -68,7 +68,7 @@ def get_comments(ticket_id: str, current_user: dict = Depends(get_current_user))
     membership = require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
     if membership.get("role") == ProjectRole.REPORTER.value:
         comments = list(

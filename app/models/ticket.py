@@ -2,7 +2,7 @@ import enum
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Priority(str, enum.Enum):
@@ -36,7 +36,8 @@ class IssueType(str, enum.Enum):
 
 
 class Ticket(BaseModel):
-    board_id: str
+    project_id: str
+    project_key: str
     ticket_id: str
     ticket_code: str
     title: str
@@ -54,7 +55,9 @@ class Ticket(BaseModel):
 
 
 class TicketCreate(BaseModel):
-    board_id: str
+    project_id: str = Field(
+        description="Project ID that will own the ticket",
+    )
     title: str
     description: str
     category: Category

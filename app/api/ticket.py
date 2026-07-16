@@ -5,24 +5,26 @@ from typing import Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import (
-    BOARD_LEAD_ROLES,
-    BOARD_MEMBER_ROLES,
-    BOARD_WORK_ROLES,
-    get_board_membership,
+    PROJECT_LEAD_ROLES,
+    PROJECT_MEMBER_ROLES,
+    PROJECT_WORK_ROLES,
+    get_project_membership,
     parse_object_id,
-    require_board_membership,
+    require_project_membership,
     require_ticket_membership,
 )
 from app.db.db import (
-    board_members_collection,
-    boards_collection,
     comments_collection,
     counters_collection,
     notifications_collection,
+    project_members_collection,
+    projects_collection,
     statuses_collection,
     ticket_collection,
     user_collection,
@@ -47,6 +49,49 @@ def _as_aware_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _serialize_ticket(ticket: dict) -> dict:
+    serialized = dict(ticket)
+    if isinstance(serialized.get("_id"), ObjectId):
+        serialized["_id"] = str(serialized["_id"])
+    return serialized
+
+
+def _initial_project_ticket_counter(project: dict) -> int:
+    """Find a safe starting point when migrating an existing project."""
+
+    highest_number = 0
+    ticket_code_pattern = re.compile(
+        rf"^{re.escape(project['code'])}-(\d+)$",
+        re.IGNORECASE,
+    )
+    for existing_ticket in ticket_collection.find({"project_id": str(project["_id"])}):
+        match = ticket_code_pattern.fullmatch(existing_ticket.get("ticket_code", ""))
+        if match:
+            highest_number = max(highest_number, int(match.group(1)))
+    return highest_number
+
+
+def _next_project_ticket_number(project: dict) -> int:
+    counter_id = f"ticket_counter:{project['_id']}"
+    if not counters_collection.find_one({"_id": counter_id}):
+        try:
+            counters_collection.insert_one(
+                {
+                    "_id": counter_id,
+                    "counter": _initial_project_ticket_counter(project),
+                }
+            )
+        except DuplicateKeyError:
+            pass
+
+    return counters_collection.find_one_and_update(
+        {"_id": counter_id},
+        {"$inc": {"counter": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )["counter"]
+
+
 def calculate_due_date(priority: str) -> datetime:
     now = datetime.now(timezone.utc)
 
@@ -68,23 +113,23 @@ def create_ticket(
     current_user: dict = Depends(get_current_user),
 ):
 
-    board = boards_collection.find_one(
-        {"_id": _parse_object_id(payload.board_id, "board_id")}
+    project = projects_collection.find_one(
+        {"_id": _parse_object_id(payload.project_id, "project_id")}
     )
-    if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    require_board_membership(
-        board["_id"],
+    require_project_membership(
+        project["_id"],
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
 
-    assigned_statuses = board.get("assigned_statuses", [])
+    assigned_statuses = project.get("assigned_statuses", [])
     if not assigned_statuses:
         raise HTTPException(
             status_code=400,
-            detail="Board has no statuses assigned. Contact admin.",
+            detail="Project has no statuses assigned. Contact an administrator.",
         )
 
     first_status_id = assigned_statuses[0]
@@ -94,22 +139,22 @@ def create_ticket(
     if not first_status:
         raise HTTPException(
             status_code=400,
-            detail="Board's first status not found. Contact admin.",
+            detail="Project's first status was not found. Contact an administrator.",
         )
 
-    next_number = counters_collection.find_one_and_update(
-        {"_id": "ticket_counter"},
-        {"$inc": {"counter": 1}},
-        upsert=True,
-        return_document=True,
-    )["counter"]
-    board_code = board.get("code", "BOARD")
-    ticket_code = f"{board_code}-{next_number}"
+    project_key = project.get("code")
+    if not project_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Project is missing a project key. Contact an administrator.",
+        )
+    next_number = _next_project_ticket_number(project)
+    ticket_code = f"{project_key}-{next_number}"
 
     ticket = {
-        "board_id": str(board["_id"]),
+        "project_id": str(project["_id"]),
         "ticket_code": ticket_code,
-        "board_code": board.get("code"),
+        "project_key": project.get("code"),
         "userId": str(current_user["_id"]),
         "title": payload.title,
         "description": payload.description,
@@ -141,7 +186,7 @@ def create_ticket(
     notification_record = notifications_collection.insert_one(notification.model_dump())
     ticket["notification_id"] = str(notification_record.inserted_id)
 
-    return ticket
+    return _serialize_ticket(ticket)
 
 
 @router.get("/tickets/detail", tags=["Tickets"])
@@ -155,11 +200,10 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     membership = require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
 
-    if ticket:
-        ticket["_id"] = str(ticket["_id"])
+    ticket["_id"] = str(ticket["_id"])
     comment_query = {"ticket_id": ticket_id}
     if membership.get("role") == ProjectRole.REPORTER.value:
         comment_query["visibility"] = "public"
@@ -168,7 +212,7 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
         comment["_id"] = str(comment["_id"])
 
     return {
-        "tickets": ticket,
+        "tickets": _serialize_ticket(ticket),
         "comments": comments,
     }
 
@@ -186,9 +230,9 @@ def update_ticket(
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_WORK_ROLES,
-        role_detail="Only board leads or members can update tickets",
+        project_members_collection,
+        allowed_roles=PROJECT_WORK_ROLES,
+        role_detail="Only project leads or members can update tickets",
     )
 
     if data.status and data.status.lower() == "in_progress":
@@ -259,9 +303,9 @@ def assign_ticket(
     actor_membership = require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_WORK_ROLES,
-        role_detail="Only board leads or members can assign tickets",
+        project_members_collection,
+        allowed_roles=PROJECT_WORK_ROLES,
+        role_detail="Only project leads or members can assign tickets",
     )
 
     agent_object_id = _parse_object_id(data.agent_id, "agent_id")
@@ -269,15 +313,15 @@ def assign_ticket(
     if not agent:
         raise HTTPException(status_code=404, detail="User not found")
 
-    target_membership = get_board_membership(
-        ticket["board_id"],
+    target_membership = get_project_membership(
+        ticket["project_id"],
         agent_object_id,
-        board_members_collection,
+        project_members_collection,
     )
-    if not target_membership or target_membership.get("role") not in BOARD_WORK_ROLES:
+    if not target_membership or target_membership.get("role") not in PROJECT_WORK_ROLES:
         raise HTTPException(
             status_code=400,
-            detail="Target user must be a lead or member of this board",
+            detail="Target user must be a lead or member of this project",
         )
 
     current_user_id = str(current_user["_id"])
@@ -290,7 +334,7 @@ def assign_ticket(
     if not is_lead and (not is_self_assign or is_reassigning_another_member):
         raise HTTPException(
             status_code=403,
-            detail="Board members can only self-assign unassigned tickets",
+            detail="Project members can only self-assign unassigned tickets",
         )
 
     ticket_collection.update_one(
@@ -313,9 +357,9 @@ def assign_ticket(
     return {"message": "Ticket assigned successfully"}
 
 
-@router.get("/tickets/{board_code}", tags=["Tickets"])
+@router.get("/tickets/{project_key}", tags=["Tickets"])
 def get_tickets(
-    board_code: str,
+    project_key: str,
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
     status: Optional[str] = Query(
@@ -343,17 +387,17 @@ def get_tickets(
     current_user: dict = Depends(get_current_user),
 ):
     query = {}
-    board = boards_collection.find_one({"code": board_code})
-    if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
+    project = projects_collection.find_one({"code": project_key})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    require_board_membership(
-        board["_id"],
+    require_project_membership(
+        project["_id"],
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
 
-    query["board_code"] = board["code"]
+    query["project_id"] = str(project["_id"])
     if status:
         query["status"] = status.lower()
     if priority:
@@ -404,8 +448,6 @@ def get_tickets(
     tickets = []
     now = datetime.now(timezone.utc)
     for ticket in cursor:
-        ticket["_id"] = str(ticket["_id"])
-
         if ticket.get("due_date") and ticket.get("current_status_name") not in [
             "resolved",
             "closed",
@@ -413,7 +455,7 @@ def get_tickets(
             ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
         else:
             ticket["is_overdue"] = False
-        tickets.append(ticket)
+        tickets.append(_serialize_ticket(ticket))
 
     total_pages = (total_count + page_size - 1) // page_size
 
@@ -442,19 +484,19 @@ def get_tickets(
 @router.get("/tickets_summary", tags=["Tickets"])
 def get_tickets_summary(current_user: dict = Depends(get_current_user)):
     user_id = parse_object_id(current_user.get("_id"), "user_id")
-    memberships = list(board_members_collection.find({"user_id": user_id}))
-    board_ids = list(
+    memberships = list(project_members_collection.find({"user_id": user_id}))
+    project_ids = list(
         {
-            str(membership["board_id"])
+            str(membership["project_id"])
             for membership in memberships
-            if membership.get("board_id")
-            and membership.get("role") in BOARD_MEMBER_ROLES
+            if membership.get("project_id")
+            and membership.get("role") in PROJECT_MEMBER_ROLES
         }
     )
-    if not board_ids:
+    if not project_ids:
         return {}
 
-    query = {"board_id": {"$in": board_ids}}
+    query = {"project_id": {"$in": project_ids}}
 
     pipeline = [
         {"$match": query},
@@ -532,9 +574,9 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_LEAD_ROLES,
-        role_detail="Only board leads can delete tickets",
+        project_members_collection,
+        allowed_roles=PROJECT_LEAD_ROLES,
+        role_detail="Only project leads can delete tickets",
     )
 
     ticket_collection.delete_one({"_id": ticket_object_id})
@@ -563,26 +605,26 @@ def move_ticket_forward(
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_WORK_ROLES,
-        role_detail="Only board leads or members can move tickets",
+        project_members_collection,
+        allowed_roles=PROJECT_WORK_ROLES,
+        role_detail="Only project leads or members can move tickets",
     )
 
-    board = boards_collection.find_one(
-        {"_id": _parse_object_id(ticket["board_id"], "board_id")}
+    project = projects_collection.find_one(
+        {"_id": _parse_object_id(ticket["project_id"], "project_id")}
     )
-    if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    assigned_statuses = board.get("assigned_statuses", [])
+    assigned_statuses = project.get("assigned_statuses", [])
     if not assigned_statuses:
-        raise HTTPException(status_code=400, detail="Board has no statuses assigned")
+        raise HTTPException(status_code=400, detail="Project has no statuses assigned")
 
     current_status_id = ticket["current_status_id"]
     if current_status_id not in assigned_statuses:
         raise HTTPException(
             status_code=400,
-            detail="Ticket's current status is not in this board's statuses",
+            detail="Ticket's current status is not in this project's statuses",
         )
 
     current_index = assigned_statuses.index(current_status_id)
@@ -668,16 +710,16 @@ def move_ticket_status(
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_WORK_ROLES,
-        role_detail="Only board leads or members can change ticket status",
+        project_members_collection,
+        allowed_roles=PROJECT_WORK_ROLES,
+        role_detail="Only project leads or members can change ticket status",
     )
 
-    board = boards_collection.find_one(
-        {"_id": _parse_object_id(ticket["board_id"], "board_id")}
+    project = projects_collection.find_one(
+        {"_id": _parse_object_id(ticket["project_id"], "project_id")}
     )
-    if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
     requested_statuses = [
         bool(payload.target_status_id),
@@ -707,10 +749,10 @@ def move_ticket_status(
     if not target_status:
         raise HTTPException(status_code=404, detail="Status not found")
 
-    if str(target_status["_id"]) not in board.get("assigned_statuses", []):
+    if str(target_status["_id"]) not in project.get("assigned_statuses", []):
         raise HTTPException(
             status_code=400,
-            detail="Target status is not assigned to this board",
+            detail="Target status is not assigned to this project",
         )
 
     ticket_collection.update_one(
@@ -741,9 +783,9 @@ def reopen_ticket(
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
-        allowed_roles=BOARD_LEAD_ROLES,
-        role_detail="Only board leads can reopen tickets",
+        project_members_collection,
+        allowed_roles=PROJECT_LEAD_ROLES,
+        role_detail="Only project leads can reopen tickets",
     )
 
     if ticket.get("current_status_name") not in ["closed", "resolved"]:
