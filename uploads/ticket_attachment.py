@@ -1,11 +1,15 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.api.auth import get_current_user
-from app.db.db import attachment_collection, ticket_collection
+from app.api.permissions import parse_object_id, require_ticket_membership
+from app.db.db import (
+    attachment_collection,
+    board_members_collection,
+    ticket_collection,
+)
 from app.models.attachment import Attachment
 
 router = APIRouter(prefix="/tickets", tags=["Attachments"])
@@ -35,10 +39,18 @@ async def upload_attachment(
     current_user=Depends(get_current_user),
 ):
 
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": parse_object_id(ticket_id, "ticket_id")}
+    )
 
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+    )
 
     extension = file.filename.split(".")[-1].lower()
 

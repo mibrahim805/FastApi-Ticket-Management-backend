@@ -8,7 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
+from app.api.permissions import (
+    BOARD_LEAD_ROLES,
+    BOARD_MEMBER_ROLES,
+    BOARD_WORK_ROLES,
+    get_board_membership,
+    parse_object_id,
+    require_board_membership,
+    require_ticket_membership,
+)
 from app.db.db import (
+    board_members_collection,
     boards_collection,
     comments_collection,
     counters_collection,
@@ -18,7 +28,8 @@ from app.db.db import (
     user_collection,
 )
 from app.models.notifications import Notifications
-from app.models.ticket import AssignAgent, TicketCreate, TicketUpdate
+from app.models.project_member import ProjectRole
+from app.models.ticket import AssignAgent, TicketCreate, TicketStatusMove, TicketUpdate
 
 router = APIRouter()
 
@@ -62,6 +73,12 @@ def create_ticket(
     )
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+
+    require_board_membership(
+        board["_id"],
+        current_user,
+        board_members_collection,
+    )
 
     assigned_statuses = board.get("assigned_statuses", [])
     if not assigned_statuses:
@@ -134,17 +151,19 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if (
-        current_user["role"] != "super_admin"
-        and ticket["userId"] != str(current_user["_id"])
-        and ticket.get("assigned_agent") != str(current_user["_id"])
-    ):
-        raise HTTPException(
-            status_code=403, detail="You can only view your own tickets"
-        )
+
+    membership = require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+    )
+
     if ticket:
         ticket["_id"] = str(ticket["_id"])
-    comments = list(comments_collection.find({"ticket_id": ticket_id}))
+    comment_query = {"ticket_id": ticket_id}
+    if membership.get("role") == ProjectRole.REPORTER.value:
+        comment_query["visibility"] = "public"
+    comments = list(comments_collection.find(comment_query))
     for comment in comments:
         comment["_id"] = str(comment["_id"])
 
@@ -163,14 +182,14 @@ def update_ticket(
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if (
-        current_user["role"] != "super_admin"
-        and ticket["userId"] != str(current_user["_id"])
-        and ticket.get("assigned_agent") != str(current_user["_id"])
-    ):
-        raise HTTPException(
-            status_code=403, detail="You can only update your own tickets"
-        )
+
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_WORK_ROLES,
+        role_detail="Only board leads or members can update tickets",
+    )
 
     if data.status and data.status.lower() == "in_progress":
         if not ticket.get("assigned_agent"):
@@ -237,21 +256,41 @@ def assign_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    actor_membership = require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_WORK_ROLES,
+        role_detail="Only board leads or members can assign tickets",
+    )
+
     agent_object_id = _parse_object_id(data.agent_id, "agent_id")
     agent = user_collection.find_one({"_id": agent_object_id})
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.get("role") != "agent":
-        raise HTTPException(status_code=400, detail="Target user is not an agent")
+        raise HTTPException(status_code=404, detail="User not found")
 
-    is_self_assign = (
-        str(current_user["_id"]) == data.agent_id and current_user["role"] == "agent"
+    target_membership = get_board_membership(
+        ticket["board_id"],
+        agent_object_id,
+        board_members_collection,
     )
-    is_admin_assign = current_user["role"] in ["super_admin", "admin"]
-
-    if not (is_self_assign or is_admin_assign):
+    if not target_membership or target_membership.get("role") not in BOARD_WORK_ROLES:
         raise HTTPException(
-            status_code=403, detail="Only admins can assign, or agents can self-assign"
+            status_code=400,
+            detail="Target user must be a lead or member of this board",
+        )
+
+    current_user_id = str(current_user["_id"])
+    is_lead = actor_membership.get("role") == ProjectRole.LEAD.value
+    is_self_assign = current_user_id == str(agent_object_id)
+    is_reassigning_another_member = ticket.get("assigned_agent") not in (
+        None,
+        current_user_id,
+    )
+    if not is_lead and (not is_self_assign or is_reassigning_another_member):
+        raise HTTPException(
+            status_code=403,
+            detail="Board members can only self-assign unassigned tickets",
         )
 
     ticket_collection.update_one(
@@ -308,14 +347,13 @@ def get_tickets(
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
 
-    query["board_code"] = board["code"]
+    require_board_membership(
+        board["_id"],
+        current_user,
+        board_members_collection,
+    )
 
-    if current_user["role"] != "super_admin":
-        current_user_id = str(current_user["_id"])
-        query["$or"] = [
-            {"userId": current_user_id},
-            {"assigned_agent": current_user_id},
-        ]
+    query["board_code"] = board["code"]
     if status:
         query["status"] = status.lower()
     if priority:
@@ -403,10 +441,20 @@ def get_tickets(
 
 @router.get("/tickets_summary", tags=["Tickets"])
 def get_tickets_summary(current_user: dict = Depends(get_current_user)):
-    query = {}
+    user_id = parse_object_id(current_user.get("_id"), "user_id")
+    memberships = list(board_members_collection.find({"user_id": user_id}))
+    board_ids = list(
+        {
+            str(membership["board_id"])
+            for membership in memberships
+            if membership.get("board_id")
+            and membership.get("role") in BOARD_MEMBER_ROLES
+        }
+    )
+    if not board_ids:
+        return {}
 
-    if current_user["role"] != "super_admin":
-        query["userId"] = str(current_user["_id"])
+    query = {"board_id": {"$in": board_ids}}
 
     pipeline = [
         {"$match": query},
@@ -476,19 +524,20 @@ def get_tickets_summary(current_user: dict = Depends(get_current_user)):
 
 @router.delete("/tickets/{ticket_id}", tags=["Tickets"])
 def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
+    ticket = ticket_collection.find_one({"_id": ticket_object_id})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if (
-        current_user["role"] != "super_admin"
-        and ticket["userId"] != str(current_user["_id"])
-        and ticket.get("assigned_agent") != str(current_user["_id"])
-    ):
-        raise HTTPException(
-            status_code=403, detail="You can only delete your own tickets"
-        )
 
-    ticket_collection.delete_one({"_id": ObjectId(ticket_id)})
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can delete tickets",
+    )
+
+    ticket_collection.delete_one({"_id": ticket_object_id})
 
     notification = Notifications(
         ticket_id=ticket_id,
@@ -510,14 +559,14 @@ def move_ticket_forward(
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    if (
-        current_user["role"] != "super_admin"
-        and ticket["userId"] != str(current_user["_id"])
-        and ticket.get("assigned_agent") != str(current_user["_id"])
-    ):
-        raise HTTPException(
-            status_code=403, detail="Only agents or admins can move tickets"
-        )
+
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_WORK_ROLES,
+        role_detail="Only board leads or members can move tickets",
+    )
 
     board = boards_collection.find_one(
         {"_id": _parse_object_id(ticket["board_id"], "board_id")}
@@ -591,6 +640,92 @@ def move_ticket_forward(
     }
 
 
+ALLOWED_STATUS_TRANSITIONS = {
+    "to_do": {"in_development"},
+    "in_development": {"code_review"},
+    "code_review": {"ready_for_qa"},
+    "ready_for_qa": {"in_qa"},
+    "in_qa": {"qa_failed"},
+    "qa_failed": {"in_development"},
+}
+
+
+def normalize_status_name(name: str) -> str:
+    return name.strip().lower().replace(" ", "_")
+
+
+@router.patch("/tickets/{ticket_id}/status", tags=["Tickets"])
+def move_ticket_status(
+    ticket_id: str,
+    payload: TicketStatusMove,
+    current_user: dict = Depends(get_current_user),
+):
+    ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
+    ticket = ticket_collection.find_one({"_id": ticket_object_id})
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_WORK_ROLES,
+        role_detail="Only board leads or members can change ticket status",
+    )
+
+    board = boards_collection.find_one(
+        {"_id": _parse_object_id(ticket["board_id"], "board_id")}
+    )
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    requested_statuses = [
+        bool(payload.target_status_id),
+        bool(payload.target_status_name and payload.target_status_name.strip()),
+    ]
+    if sum(requested_statuses) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one of target_status_id or target_status_name",
+        )
+
+    if payload.target_status_id:
+        status_object_id = _parse_object_id(payload.target_status_id, "status_id")
+        target_status = statuses_collection.find_one({"_id": status_object_id})
+    else:
+        target_status = statuses_collection.find_one(
+            {
+                "name": {
+                    "$regex": re.compile(
+                        f"^{re.escape(payload.target_status_name.strip())}$",
+                        re.IGNORECASE,
+                    )
+                }
+            }
+        )
+
+    if not target_status:
+        raise HTTPException(status_code=404, detail="Status not found")
+
+    if str(target_status["_id"]) not in board.get("assigned_statuses", []):
+        raise HTTPException(
+            status_code=400,
+            detail="Target status is not assigned to this board",
+        )
+
+    ticket_collection.update_one(
+        {"_id": ticket_object_id},
+        {
+            "$set": {
+                "current_status_id": str(target_status["_id"]),
+                "current_status_name": target_status["name"],
+            }
+        },
+    )
+
+    return {"message": "Ticket status updated successfully"}
+
+
 @router.put("/tickets/{ticket_id}/reopen", tags=["Tickets"])
 def reopen_ticket(
     ticket_id: str,
@@ -603,11 +738,13 @@ def reopen_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only admins can reopen tickets",
-        )
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+        allowed_roles=BOARD_LEAD_ROLES,
+        role_detail="Only board leads can reopen tickets",
+    )
 
     if ticket.get("current_status_name") not in ["closed", "resolved"]:
         raise HTTPException(

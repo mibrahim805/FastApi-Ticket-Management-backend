@@ -6,7 +6,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from app.api.auth import get_current_user
-from app.db.db import ticket_activity_collection, ticket_collection
+from app.api.permissions import parse_object_id, require_ticket_membership
+from app.db.db import (
+    board_members_collection,
+    ticket_activity_collection,
+    ticket_collection,
+)
 
 router = APIRouter(prefix="/activities", tags=["Activity"])
 
@@ -31,13 +36,20 @@ def log_activity(
 
 @router.get("/tickets/{ticket_id}")
 def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user)):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket_object_id = parse_object_id(ticket_id, "ticket_id")
+    ticket = ticket_collection.find_one({"_id": ticket_object_id})
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
+    require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+    )
+
     activities = list(
         ticket_activity_collection.find(
-            {"ticket_id": {"$in": [ticket_id, ObjectId(ticket_id)]}}
+            {"ticket_id": {"$in": [ticket_id, ticket_object_id]}}
         ).sort("changed_at", -1)
     )
 
@@ -53,7 +65,5 @@ def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user)):
         "ticket_code": ticket["ticket_code"],
         "activities": activities,
     }
-
-    print("PAYLOAD ABOUT TO RETURN:", payload)
 
     return JSONResponse(content=jsonable_encoder(payload))

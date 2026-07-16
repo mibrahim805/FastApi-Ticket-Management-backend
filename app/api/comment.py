@@ -1,10 +1,16 @@
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
-from app.db.db import comments_collection, notifications_collection, ticket_collection
+from app.api.permissions import parse_object_id, require_ticket_membership
+from app.db.db import (
+    board_members_collection,
+    comments_collection,
+    notifications_collection,
+    ticket_collection,
+)
 from app.models.comment import Comment
 from app.models.notifications import Notifications
+from app.models.project_member import ProjectRole
 
 router = APIRouter()
 
@@ -13,18 +19,21 @@ router = APIRouter()
 def create_comment(
     ticket_id: str, comment: Comment, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one({"_id": ObjectId(ticket_id)})
+    ticket = ticket_collection.find_one(
+        {"_id": parse_object_id(ticket_id, "ticket_id")}
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    membership = require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+    )
     if (
-        str(current_user["_id"]) != ticket["userId"]
-        and current_user["role"] != "super_admin"
+        membership.get("role") == ProjectRole.REPORTER.value
+        and comment.visibility == "internal"
     ):
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have permission to comment on this ticket",
-        )
-    if current_user["role"] == "customer" and comment.visibility == "internal":
         raise HTTPException(
             status_code=403,
             detail="You do not have permission to create internal comments",
@@ -36,10 +45,10 @@ def create_comment(
         "message": comment.message,
         "visibility": comment.visibility,
     }
-    comments_collection.insert_one(new_comment)
+    result = comments_collection.insert_one(new_comment)
     notification = Notifications(
         ticket_id=ticket_id,
-        comment_id=str(new_comment["_id"]),
+        comment_id=str(result.inserted_id),
         user_id=str(current_user["_id"]),
         event_type="comment_created",
     )
@@ -50,7 +59,18 @@ def create_comment(
 
 @router.get("/comments/{ticket_id}", tags=["Comments"])
 def get_comments(ticket_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] == "customer":
+    ticket = ticket_collection.find_one(
+        {"_id": parse_object_id(ticket_id, "ticket_id")}
+    )
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    membership = require_ticket_membership(
+        ticket,
+        current_user,
+        board_members_collection,
+    )
+    if membership.get("role") == ProjectRole.REPORTER.value:
         comments = list(
             comments_collection.find(
                 {"ticket_id": ticket_id, "visibility": "public"}

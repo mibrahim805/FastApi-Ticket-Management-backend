@@ -1,3 +1,4 @@
+import sys
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,10 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
         if isinstance(expected, dict) and "$regex" in expected:
             value = document.get(key)
             if value is None or not expected["$regex"].search(str(value)):
+                return False
+            continue
+        if isinstance(expected, dict) and "$in" in expected:
+            if document.get(key) not in expected["$in"]:
                 return False
             continue
         if document.get(key) != expected:
@@ -67,12 +72,23 @@ class FakeCollection:
         self.updated_documents: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.deleted_queries: list[dict[str, Any]] = []
 
-    def find_one(self, query):
+    def find_one(self, query, projection=None):
         if isinstance(query, ObjectId):
             query = {"_id": query}
         for document in self.documents:
             if _matches(document, query):
-                return deepcopy(document)
+                result = deepcopy(document)
+                if projection:
+                    included_fields = {
+                        key for key, included in projection.items() if included
+                    }
+                    included_fields.add("_id")
+                    result = {
+                        key: value
+                        for key, value in result.items()
+                        if key in included_fields
+                    }
+                return result
         return None
 
     def insert_one(self, document):
@@ -95,6 +111,10 @@ class FakeCollection:
     def delete_one(self, query):
         if isinstance(query, ObjectId):
             query = {"_id": query}
+        self.deleted_queries.append(query)
+        self.documents = [doc for doc in self.documents if not _matches(doc, query)]
+
+    def delete_many(self, query):
         self.deleted_queries.append(query)
         self.documents = [doc for doc in self.documents if not _matches(doc, query)]
 
@@ -138,6 +158,46 @@ class FakeCollection:
 @pytest.fixture
 def fake_collection():
     return FakeCollection()
+
+
+@pytest.fixture
+def board_members(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
+def grant_board_role(board_members):
+    def grant(board_id, user_id, role="lead"):
+        board_object_id = (
+            board_id if isinstance(board_id, ObjectId) else ObjectId(board_id)
+        )
+        user_object_id = user_id if isinstance(user_id, ObjectId) else ObjectId(user_id)
+        board_members.insert_one(
+            {
+                "board_id": board_object_id,
+                "user_id": user_object_id,
+                "role": role,
+            }
+        )
+
+    return grant
+
+
+@pytest.fixture(autouse=True)
+def isolate_board_members_collection(monkeypatch, board_members):
+    for module_name in (
+        "app.db.db",
+        "app.api.activity",
+        "app.api.board",
+        "app.api.comment",
+        "app.api.ticket",
+        "uploads.ticket_attachment",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "board_members_collection"):
+            monkeypatch.setattr(module, "board_members_collection", board_members)
+
+    return board_members
 
 
 def test_matches_returns_false_when_no_or_clause_matches():
