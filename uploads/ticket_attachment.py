@@ -7,7 +7,7 @@ from app.api.auth import get_current_user
 from app.api.permissions import parse_object_id, require_ticket_membership
 from app.db.db import (
     attachment_collection,
-    board_members_collection,
+    project_members_collection,
     ticket_collection,
 )
 from app.models.attachment import Attachment
@@ -49,7 +49,7 @@ async def upload_attachment(
     require_ticket_membership(
         ticket,
         current_user,
-        board_members_collection,
+        project_members_collection,
     )
 
     extension = file.filename.split(".")[-1].lower()

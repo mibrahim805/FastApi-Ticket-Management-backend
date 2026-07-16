@@ -105,6 +105,9 @@ class FakeCollection:
             if _matches(document, query):
                 if "$set" in update:
                     document.update(update["$set"])
+                if "$unset" in update:
+                    for key in update["$unset"]:
+                        document.pop(key, None)
                 self.updated_documents.append((query, update))
                 return
 
@@ -161,20 +164,20 @@ def fake_collection():
 
 
 @pytest.fixture
-def board_members(fake_collection):
+def project_members(fake_collection):
     return fake_collection.__class__()
 
 
 @pytest.fixture
-def grant_board_role(board_members):
-    def grant(board_id, user_id, role="lead"):
-        board_object_id = (
-            board_id if isinstance(board_id, ObjectId) else ObjectId(board_id)
+def grant_project_role(project_members):
+    def grant(project_id, user_id, role="lead"):
+        project_object_id = (
+            project_id if isinstance(project_id, ObjectId) else ObjectId(project_id)
         )
         user_object_id = user_id if isinstance(user_id, ObjectId) else ObjectId(user_id)
-        board_members.insert_one(
+        project_members.insert_one(
             {
-                "board_id": board_object_id,
+                "project_id": project_object_id,
                 "user_id": user_object_id,
                 "role": role,
             }
@@ -184,20 +187,20 @@ def grant_board_role(board_members):
 
 
 @pytest.fixture(autouse=True)
-def isolate_board_members_collection(monkeypatch, board_members):
+def isolate_project_members_collection(monkeypatch, project_members):
     for module_name in (
         "app.db.db",
         "app.api.activity",
-        "app.api.board",
+        "app.api.project",
         "app.api.comment",
         "app.api.ticket",
         "uploads.ticket_attachment",
     ):
         module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "board_members_collection"):
-            monkeypatch.setattr(module, "board_members_collection", board_members)
+        if module is not None and hasattr(module, "project_members_collection"):
+            monkeypatch.setattr(module, "project_members_collection", project_members)
 
-    return board_members
+    return project_members
 
 
 def test_matches_returns_false_when_no_or_clause_matches():

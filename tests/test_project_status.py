@@ -2,20 +2,20 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.api import board, status
-from app.models.board import BoardStatusAssign
+from app.api import project, status
+from app.models.project import ProjectStatusAssign
 from app.models.status import StatusCreate, StatusUpdate
 
 
-def test_assign_statuses_to_board_orders_statuses(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_statuses_to_project_orders_statuses(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     lead_id = ObjectId()
     first_id = ObjectId()
     second_id = ObjectId()
 
-    boards = fake_collection.__class__([{"_id": board_id}])
+    projects = fake_collection.__class__([{"_id": project_id}])
     statuses = fake_collection.__class__(
         [
             {"_id": second_id, "name": "Done", "order": 2},
@@ -23,59 +23,60 @@ def test_assign_statuses_to_board_orders_statuses(
         ]
     )
 
-    monkeypatch.setattr(board, "boards_collection", boards)
-    monkeypatch.setattr(board, "statuses_collection", statuses)
-    grant_board_role(board_id, lead_id)
+    monkeypatch.setattr(project, "projects_collection", projects)
+    monkeypatch.setattr(project, "statuses_collection", statuses)
+    grant_project_role(project_id, lead_id)
 
-    response = board.assign_statuses_to_board(
-        str(board_id),
-        BoardStatusAssign(status_ids=[str(second_id), str(first_id)]),
+    response = project.assign_statuses_to_project(
+        str(project_id),
+        ProjectStatusAssign(status_ids=[str(second_id), str(first_id)]),
         current_user={"_id": lead_id, "role": "super_admin"},
     )
 
     assert response["assigned_statuses"][0]["name"] == "Open"
-    assert boards.documents[0]["assigned_statuses"] == [str(first_id), str(second_id)]
+    assert projects.documents[0]["assigned_statuses"] == [str(first_id), str(second_id)]
+    assert projects.documents[0]["default_status_id"] == str(first_id)
 
 
-def test_assign_statuses_to_board_rejects_non_admin(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_statuses_to_project_rejects_non_admin(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     member_id = ObjectId()
-    boards = fake_collection.__class__([{"_id": board_id}])
-    monkeypatch.setattr(board, "boards_collection", boards)
-    monkeypatch.setattr(board, "statuses_collection", fake_collection.__class__())
-    grant_board_role(board_id, member_id, "member")
+    projects = fake_collection.__class__([{"_id": project_id}])
+    monkeypatch.setattr(project, "projects_collection", projects)
+    monkeypatch.setattr(project, "statuses_collection", fake_collection.__class__())
+    grant_project_role(project_id, member_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
-        board.assign_statuses_to_board(
-            str(board_id),
-            BoardStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
+        project.assign_statuses_to_project(
+            str(project_id),
+            ProjectStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
             current_user={"_id": member_id, "role": "agent"},
         )
 
     assert exc_info.value.status_code == 403
 
 
-def test_assign_statuses_to_board_rejects_duplicate_ids(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_statuses_to_project_rejects_duplicate_ids(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    board_id = ObjectId()
+    project_id = ObjectId()
     lead_id = ObjectId()
     status_id = ObjectId()
-    boards = fake_collection.__class__([{"_id": board_id}])
-    monkeypatch.setattr(board, "boards_collection", boards)
+    projects = fake_collection.__class__([{"_id": project_id}])
+    monkeypatch.setattr(project, "projects_collection", projects)
     monkeypatch.setattr(
-        board,
+        project,
         "statuses_collection",
         fake_collection.__class__([{"_id": status_id, "name": "Open", "order": 1}]),
     )
-    grant_board_role(board_id, lead_id)
+    grant_project_role(project_id, lead_id)
 
     with pytest.raises(HTTPException) as exc_info:
-        board.assign_statuses_to_board(
-            str(board_id),
-            BoardStatusAssign(status_ids=[str(status_id), str(status_id)]),
+        project.assign_statuses_to_project(
+            str(project_id),
+            ProjectStatusAssign(status_ids=[str(status_id), str(status_id)]),
             current_user={"_id": lead_id, "role": "super_admin"},
         )
 

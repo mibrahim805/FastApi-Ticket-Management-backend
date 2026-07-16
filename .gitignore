@@ -1,4 +1,9 @@
+# Python bytecode and test caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local environment files
 .venv/
 .env

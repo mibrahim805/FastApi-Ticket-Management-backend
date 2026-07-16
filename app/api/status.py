@@ -4,7 +4,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import get_current_user
-from app.db.db import boards_collection, statuses_collection
+from app.db.db import projects_collection, statuses_collection
 from app.models.status import StatusCreate, StatusUpdate
 
 router = APIRouter(prefix="/statuses", tags=["Statuses"])
@@ -163,11 +163,11 @@ def delete_status(
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
-    board_using = boards_collection.find_one({"assigned_statuses": status_id})
-    if board_using:
+    project_using = projects_collection.find_one({"assigned_statuses": status_id})
+    if project_using:
         raise HTTPException(
             status_code=400,
-            detail="Cannot delete — this status is assigned to one or more boards",
+            detail="Cannot delete — this status is assigned to one or more projects",
         )
 
     statuses_collection.delete_one({"_id": ObjectId(status_id)})

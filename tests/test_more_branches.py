@@ -5,21 +5,20 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.api import activity, auth
-from app.api import board as board_mod
+from app.api import project as project_mod
 from app.api import status as status_mod
 from app.api import ticket as ticket_mod
-from app.models.board import AssignBoard
 from app.models.status import StatusUpdate
 from app.models.ticket import TicketUpdate
 
 
-def test_activity_log_and_conversion(monkeypatch, fake_collection, grant_board_role):
+def test_activity_log_and_conversion(monkeypatch, fake_collection, grant_project_role):
     # ensure log_activity inserts and get_ticket_activity converts ObjectId and datetime
     acts = fake_collection.__class__()
-    board_id = ObjectId()
+    project_id = ObjectId()
     user_id = ObjectId()
     tickets = fake_collection.__class__(
-        [{"_id": ObjectId(), "board_id": str(board_id), "ticket_code": "X-1"}]
+        [{"_id": ObjectId(), "project_id": str(project_id), "ticket_code": "X-1"}]
     )
     monkeypatch.setattr(activity, "ticket_activity_collection", acts)
     monkeypatch.setattr(activity, "ticket_collection", tickets)
@@ -51,7 +50,7 @@ def test_activity_log_and_conversion(monkeypatch, fake_collection, grant_board_r
         "ticket_activity_collection",
         type("X", (), {"find": staticmethod(simple_find)}),
     )
-    grant_board_role(board_id, user_id, "member")
+    grant_project_role(project_id, user_id, "member")
     resp = activity.get_ticket_activity(
         str(tickets.documents[0]["_id"]),
         current_user={"_id": user_id, "role": "user"},
@@ -78,110 +77,84 @@ def test_auth_hash_and_token_and_generate(monkeypatch):
     assert isinstance(t, str) and len(t) > 0
 
 
-def test_board_assign_update_delete_success(
-    monkeypatch, fake_collection, grant_board_role
+def test_project_update_get_delete_success(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     tickets = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-    monkeypatch.setattr(board_mod, "ticket_collection", tickets)
+    monkeypatch.setattr(project_mod, "projects_collection", projects)
+    monkeypatch.setattr(project_mod, "ticket_collection", tickets)
 
-    # assign_board success when no assigned_agent
-    bid = boards.insert_one({"_id": ObjectId(), "assigned_agent": None}).inserted_id
     lead_id = ObjectId()
-    agent1_id = ObjectId()
-    agent2_id = ObjectId()
-    grant_board_role(bid, lead_id)
-    grant_board_role(bid, agent1_id, "member")
-    grant_board_role(bid, agent2_id, "member")
 
-    resp = board_mod.assign_board(
-        str(bid),
-        AssignBoard(agent_id=str(agent1_id)),
-        current_user={"_id": lead_id, "role": "super_admin"},
-    )
-    assert resp["message"] == "Board assigned to agent"
-    assert boards.documents[-1]["assigned_agent"] == str(agent1_id)
+    # update_project success
+    projects.insert_one({"_id": ObjectId(), "name": "Old"})
+    uid = str(projects.documents[-1]["_id"])
+    grant_project_role(uid, lead_id)
+    from app.models.project import ProjectCreate
 
-    # reassignment allowed for super_admin
-    resp2 = board_mod.assign_board(
-        str(bid),
-        AssignBoard(agent_id=str(agent2_id)),
-        current_user={"_id": lead_id, "role": "super_admin"},
-    )
-
-    assert resp2["message"] == "Board assigned to agent"
-    assert boards.documents[-1]["assigned_agent"] == str(agent2_id)
-
-    # update_board success
-    boards.insert_one({"_id": ObjectId(), "name": "Old"})
-    uid = str(boards.documents[-1]["_id"])
-    grant_board_role(uid, lead_id)
-    from app.models.board import BoardCreate
-
-    resp3 = board_mod.update_board(
-        BoardCreate(name="New", code="C"),
+    resp3 = project_mod.update_project(
+        ProjectCreate(name="New", code="CC"),
         uid,
         current_user={"_id": lead_id, "role": "super_admin"},
     )
 
-    assert resp3["message"] == "Board updated"
+    assert resp3["message"] == "Project updated"
 
-    # get_board success when assigned_agent matches
-    # test by setting assigned_agent to current_user
+    # get_project success for a project member
     uid2 = ObjectId()
-    boards.insert_one({"_id": ObjectId(), "assigned_agent": str(uid2)})
-    grant_board_role(boards.documents[-1]["_id"], uid2, "reporter")
-    res_get = board_mod.get_board(
-        str(boards.documents[-1]["_id"]),
+    projects.insert_one({"_id": ObjectId()})
+    grant_project_role(projects.documents[-1]["_id"], uid2, "reporter")
+    res_get = project_mod.get_project(
+        str(projects.documents[-1]["_id"]),
         current_user={"_id": uid2, "role": "super_admin"},
     )
-    assert "board" in res_get
+    assert "project" in res_get
 
     # delete success
-    d = boards.insert_one({"_id": ObjectId()}).inserted_id
-    grant_board_role(d, lead_id)
-    resp4 = board_mod.delete_board(
+    d = projects.insert_one({"_id": ObjectId()}).inserted_id
+    grant_project_role(d, lead_id)
+    resp4 = project_mod.delete_project(
         str(d), current_user={"_id": lead_id, "role": "super_admin"}
     )
-    assert resp4["message"] == "Board deleted"
+    assert resp4["message"] == "Project deleted"
 
 
-def test_assign_statuses_to_board_too_few(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_statuses_to_project_too_few(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    boards = fake_collection.__class__([{"_id": ObjectId()}])
+    projects = fake_collection.__class__([{"_id": ObjectId()}])
     statuses = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-    monkeypatch.setattr(board_mod, "statuses_collection", statuses)
+    monkeypatch.setattr(project_mod, "projects_collection", projects)
+    monkeypatch.setattr(project_mod, "statuses_collection", statuses)
 
-    from app.models.board import BoardStatusAssign
+    from app.models.project import ProjectStatusAssign
 
     lead_id = ObjectId()
-    grant_board_role(boards.documents[0]["_id"], lead_id)
+    grant_project_role(projects.documents[0]["_id"], lead_id)
 
     with pytest.raises(HTTPException):
-        board_mod.assign_statuses_to_board(
-            str(boards.documents[0]["_id"]),
-            BoardStatusAssign(status_ids=[str(ObjectId())]),
+        project_mod.assign_statuses_to_project(
+            str(projects.documents[0]["_id"]),
+            ProjectStatusAssign(status_ids=[str(ObjectId())]),
             current_user={"_id": lead_id, "role": "super_admin"},
         )
 
 
 def test_ticket_update_missing_and_unauthorized_and_filters(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     statuses = fake_collection.__class__()
     users = fake_collection.__class__()
 
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "comments_collection", comments)
     monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
-    monkeypatch.setattr(ticket_mod, "boards_collection", boards)
+    monkeypatch.setattr(ticket_mod, "projects_collection", projects)
     monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
     monkeypatch.setattr(ticket_mod, "user_collection", users)
 
@@ -203,14 +176,17 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
         )
 
     # get_tickets with filters: status/priority/search/sort asc and non-super_admin
-    bcode = "BCX"
-    board_id = boards.insert_one({"_id": ObjectId(), "code": bcode}).inserted_id
+    project_key = "BCX"
+    project_id = projects.insert_one(
+        {"_id": ObjectId(), "code": project_key}
+    ).inserted_id
     uid = ObjectId()
-    grant_board_role(board_id, uid, "member")
+    grant_project_role(project_id, uid, "member")
     tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_code": bcode,
+            "project_id": str(project_id),
+            "project_key": project_key,
             "createdAt": datetime.now(timezone.utc),
             "priorityOrder": 1,
             "dueDate": datetime.now(timezone.utc),
@@ -223,7 +199,7 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     )
 
     res = ticket_mod.get_tickets(
-        bcode,
+        project_key,
         page=1,
         page_size=10,
         status="Open",
@@ -248,18 +224,18 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
             str(td), current_user={"_id": ObjectId(), "role": "agent"}
         )
 
-    # move_ticket_forward: board has no statuses
+    # move_ticket_forward: project has no statuses
     t1 = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(ObjectId()),
+            "project_id": str(ObjectId()),
             "userId": str(uid),
             "ticket_code": "T1",
             "current_status_id": str(ObjectId()),
             "current_status_name": "S",
         }
     ).inserted_id
-    boards.insert_one({"_id": ObjectId()})
+    projects.insert_one({"_id": ObjectId()})
     with pytest.raises(HTTPException):
         ticket_mod.move_ticket_forward(
             str(t1), current_user={"_id": uid, "role": "super_admin"}
@@ -269,7 +245,8 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_code": bcode,
+            "project_id": str(project_id),
+            "project_key": project_key,
             "createdAt": datetime.now(timezone.utc),
             "priorityOrder": 1,
             "dueDate": datetime.now(timezone.utc),
@@ -279,7 +256,7 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
         }
     )
     res_f = ticket_mod.get_tickets(
-        bcode,
+        project_key,
         page=1,
         page_size=10,
         status=None,
@@ -293,15 +270,15 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     )
     assert "data" in res_f
 
-    # move_ticket_forward board has empty statuses -> 400
-    b_empty = boards.insert_one(
+    # move_ticket_forward project has empty statuses -> 400
+    b_empty = projects.insert_one(
         {"_id": ObjectId(), "assigned_statuses": []}
     ).inserted_id
-    grant_board_role(b_empty, uid, "member")
+    grant_project_role(b_empty, uid, "member")
     tt_empty = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(b_empty),
+            "project_id": str(b_empty),
             "userId": str(uid),
             "ticket_code": "T_EMPTY",
             "current_status_id": str(ObjectId()),
@@ -354,29 +331,29 @@ def test_activate_or_deactivate_activates(monkeypatch, fake_collection):
 
 
 def test_ticket_comments_conversion_and_move_last_closes(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     statuses = fake_collection.__class__()
     users = fake_collection.__class__()
 
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "comments_collection", comments)
     monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
-    monkeypatch.setattr(ticket_mod, "boards_collection", boards)
+    monkeypatch.setattr(ticket_mod, "projects_collection", projects)
     monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
     monkeypatch.setattr(ticket_mod, "user_collection", users)
 
     # comments conversion
-    detail_board_id = ObjectId()
+    detail_project_id = ObjectId()
     detail_user_id = ObjectId()
     tid = tickets.insert_one(
-        {"_id": ObjectId(), "board_id": str(detail_board_id), "userId": "u"}
+        {"_id": ObjectId(), "project_id": str(detail_project_id), "userId": "u"}
     ).inserted_id
-    grant_board_role(detail_board_id, detail_user_id)
+    grant_project_role(detail_project_id, detail_user_id)
     comments.insert_one({"_id": ObjectId(), "ticket_id": str(tid), "text": "c"})
     resp = ticket_mod.get_ticket_details(
         current_user={"_id": detail_user_id, "role": "super_admin"},
@@ -385,14 +362,17 @@ def test_ticket_comments_conversion_and_move_last_closes(
     assert resp["comments"][0]["_id"] == str(comments.documents[0]["_id"])
 
     # get_tickets status/priority lower branches
-    bcode = "BB"
+    project_key = "BB"
     uid = ObjectId()
-    list_board_id = boards.insert_one({"_id": ObjectId(), "code": bcode}).inserted_id
-    grant_board_role(list_board_id, uid, "member")
+    list_project_id = projects.insert_one(
+        {"_id": ObjectId(), "code": project_key}
+    ).inserted_id
+    grant_project_role(list_project_id, uid, "member")
     tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_code": bcode,
+            "project_id": str(list_project_id),
+            "project_key": project_key,
             "createdAt": datetime.now(timezone.utc),
             "priorityOrder": 1,
             "dueDate": datetime.now(timezone.utc),
@@ -404,7 +384,7 @@ def test_ticket_comments_conversion_and_move_last_closes(
         }
     )
     res = ticket_mod.get_tickets(
-        bcode,
+        project_key,
         page=1,
         page_size=10,
         status="open",
@@ -422,19 +402,19 @@ def test_ticket_comments_conversion_and_move_last_closes(
     s1 = ObjectId()
     s2 = ObjectId()
     s3 = ObjectId()
-    b = boards.insert_one(
+    b = projects.insert_one(
         {
             "_id": ObjectId(),
             "assigned_statuses": [str(s1), str(s2), str(s3)],
             "code": "BB",
         }
     ).inserted_id
-    grant_board_role(b, uid, "member")
+    grant_project_role(b, uid, "member")
     statuses.insert_one({"_id": s3, "name": "Last"})
     tt = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(b),
+            "project_id": str(b),
             "userId": str(uid),
             "ticket_code": "TX",
             "current_status_id": str(s2),
@@ -484,9 +464,9 @@ def test_activity_log_inserts(monkeypatch, fake_collection):
 
 def test_status_permissions_and_delete_missing(monkeypatch, fake_collection):
     statuses = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     monkeypatch.setattr(status_mod, "statuses_collection", statuses)
-    monkeypatch.setattr(status_mod, "boards_collection", boards)
+    monkeypatch.setattr(status_mod, "projects_collection", projects)
 
     # update by non-admin
     with pytest.raises(HTTPException):
@@ -503,101 +483,58 @@ def test_status_permissions_and_delete_missing(monkeypatch, fake_collection):
         status_mod.delete_status(str(ObjectId()), current_user={"role": "super_admin"})
 
 
-def test_board_assign_not_found_and_reassign_forbidden(monkeypatch, fake_collection):
-    boards = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-
-    import asyncio
-
-    # assign to non-existing board -> 404
-    with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.assign_board(
-                str(ObjectId()),
-                AssignBoard(agent_id="a"),
-                current_user={"_id": ObjectId(), "role": "super_admin"},
-            )
-        )
-
-    # create a board assigned to someone else
-    bid = boards.insert_one({"_id": ObjectId(), "assigned_agent": "other"}).inserted_id
-    # non-super_admin trying to reassign should 403
-    with pytest.raises(HTTPException):
-        asyncio.run(
-            board_mod.assign_board(
-                str(bid),
-                AssignBoard(agent_id="new"),
-                current_user={"_id": ObjectId(), "role": "agent"},
-            )
-        )
-
-
-def test_assign_statuses_board_not_found_and_status_not_found(
-    monkeypatch, fake_collection, grant_board_role
+def test_assign_statuses_project_not_found_and_status_not_found(
+    monkeypatch, fake_collection, grant_project_role
 ):
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     statuses = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-    monkeypatch.setattr(board_mod, "statuses_collection", statuses)
+    monkeypatch.setattr(project_mod, "projects_collection", projects)
+    monkeypatch.setattr(project_mod, "statuses_collection", statuses)
 
-    from app.models.board import BoardStatusAssign
+    from app.models.project import ProjectStatusAssign
 
-    # board not found
+    # project not found
     with pytest.raises(HTTPException):
-        board_mod.assign_statuses_to_board(
+        project_mod.assign_statuses_to_project(
             str(ObjectId()),
-            BoardStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
+            ProjectStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
             current_user={"_id": ObjectId(), "role": "super_admin"},
         )
 
-    # create board and one missing status -> should 404 when checking statuses
-    b = boards.insert_one({"_id": ObjectId()}).inserted_id
+    # create project and one missing status -> should 404 when checking statuses
+    b = projects.insert_one({"_id": ObjectId()}).inserted_id
     lead_id = ObjectId()
-    grant_board_role(b, lead_id)
+    grant_project_role(b, lead_id)
     with pytest.raises(HTTPException):
-        board_mod.assign_statuses_to_board(
+        project_mod.assign_statuses_to_project(
             str(b),
-            BoardStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
+            ProjectStatusAssign(status_ids=[str(ObjectId()), str(ObjectId())]),
             current_user={"_id": lead_id, "role": "super_admin"},
         )
 
 
-def test_assign_board_inner_reassign_forbidden(
-    monkeypatch, fake_collection, grant_board_role
-):
-    boards = fake_collection.__class__()
-    monkeypatch.setattr(board_mod, "boards_collection", boards)
-    bid = boards.insert_one({"_id": ObjectId(), "assigned_agent": "a1"}).inserted_id
-    member_id = ObjectId()
-    grant_board_role(bid, member_id, "member")
-
-    with pytest.raises(HTTPException):
-        board_mod.assign_board(
-            str(bid),
-            AssignBoard(agent_id=str(ObjectId())),
-            current_user={"_id": member_id, "role": "agent"},
-        )
-
-
 def test_ticket_lower_filters_and_move_forbidden(
-    monkeypatch, fake_collection, grant_board_role
+    monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
-    boards = fake_collection.__class__()
+    projects = fake_collection.__class__()
     statuses = fake_collection.__class__()
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket_mod, "boards_collection", boards)
+    monkeypatch.setattr(ticket_mod, "projects_collection", projects)
     monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
 
-    bcode = "ZC"
-    board_id = boards.insert_one({"_id": ObjectId(), "code": bcode}).inserted_id
+    project_key = "ZC"
+    project_id = projects.insert_one(
+        {"_id": ObjectId(), "code": project_key}
+    ).inserted_id
     uid = ObjectId()
-    grant_board_role(board_id, uid, "reporter")
+    grant_project_role(project_id, uid, "reporter")
     # add ticket belonging to someone else
     tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_code": bcode,
+            "project_id": str(project_id),
+            "project_key": project_key,
             "createdAt": datetime.now(timezone.utc),
             "priorityOrder": 1,
             "dueDate": datetime.now(timezone.utc),
@@ -611,7 +548,7 @@ def test_ticket_lower_filters_and_move_forbidden(
 
     # call get_tickets with uppercase status/priority to exercise .lower()
     res = ticket_mod.get_tickets(
-        bcode,
+        project_key,
         page=1,
         page_size=10,
         status="OPEN",
@@ -626,18 +563,18 @@ def test_ticket_lower_filters_and_move_forbidden(
     assert "data" in res
 
     # move_ticket_forward forbidden for agent who is not owner
-    move_board_id = ObjectId()
+    move_project_id = ObjectId()
     t = tickets.insert_one(
         {
             "_id": ObjectId(),
-            "board_id": str(move_board_id),
+            "project_id": str(move_project_id),
             "userId": str(ObjectId()),
             "ticket_code": "TF",
             "current_status_id": str(ObjectId()),
             "current_status_name": "S",
         }
     ).inserted_id
-    grant_board_role(move_board_id, uid, "reporter")
+    grant_project_role(move_project_id, uid, "reporter")
     with pytest.raises(HTTPException):
         ticket_mod.move_ticket_forward(
             str(t), current_user={"_id": uid, "role": "agent"}
