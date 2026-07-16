@@ -4,6 +4,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.project_member import ProjectRole
 
+PROJECT_KEY_PATTERN = r"^[A-Z][A-Z0-9]{1,9}$"
+PROJECT_KEY_DESCRIPTION = (
+    "Unique project key: 2-10 characters, beginning with an uppercase "
+    "letter and containing only uppercase letters or digits"
+)
+
 
 class Project(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -12,10 +18,8 @@ class Project(BaseModel):
     code: str = Field(
         min_length=2,
         max_length=10,
-        description=(
-            "Unique project key: 2-10 characters, beginning with an uppercase "
-            "letter and containing only uppercase letters or digits"
-        ),
+        pattern=PROJECT_KEY_PATTERN,
+        description=PROJECT_KEY_DESCRIPTION,
     )
     created_by: str
     total_tickets: int = 0
@@ -28,10 +32,8 @@ class ProjectCreate(BaseModel):
     code: str = Field(
         min_length=2,
         max_length=10,
-        description=(
-            "Unique project key: 2-10 characters, beginning with an uppercase "
-            "letter and containing only uppercase letters or digits"
-        ),
+        pattern=PROJECT_KEY_PATTERN,
+        description=PROJECT_KEY_DESCRIPTION,
     )
 
     @field_validator("name")
@@ -49,10 +51,8 @@ class ProjectUpdate(BaseModel):
         default=None,
         min_length=2,
         max_length=10,
-        description=(
-            "Unique project key: 2-10 characters, beginning with an uppercase "
-            "letter and containing only uppercase letters or digits"
-        ),
+        pattern=PROJECT_KEY_PATTERN,
+        description=PROJECT_KEY_DESCRIPTION,
     )
 
     @field_validator("name")

@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api import (
@@ -10,10 +12,18 @@ from app.api import (
     status,
     ticket,
 )
+from app.db.db import ensure_database_indexes
 from uploads import ticket_attachment
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_database_indexes()
+    yield
+
+
 # from uploads import ticket_attachment
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 app.include_router(registration.router)
 app.include_router(project.router)

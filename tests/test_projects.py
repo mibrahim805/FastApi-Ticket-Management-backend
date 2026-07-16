@@ -1,11 +1,17 @@
+import asyncio
+
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 from pydantic import ValidationError
+from pymongo.errors import DuplicateKeyError
 
+from app import main as app_main
 from app.api import project, ticket
+from app.db import db as database
 from app.main import app
-from app.models.project import ProjectCreate, ProjectMemberCreate, ProjectUpdate
+from app.models.project import ProjectCreate, ProjectUpdate
+from app.models.project_member import ProjectMemberCreate
 from app.models.ticket import Category, Priority, TicketCreate
 
 
@@ -25,6 +31,52 @@ def test_project_key_rejects_invalid_values(code):
         ProjectCreate(name="Example", code=code)
 
 
+@pytest.mark.parametrize("code", ["lower", "1ABC", "A-B"])
+def test_project_update_key_rejects_invalid_values(code):
+    with pytest.raises(ValidationError):
+        ProjectUpdate(code=code)
+
+
+def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch):
+    calls = []
+
+    class RecordingCollection:
+        def create_index(self, keys, **options):
+            calls.append((keys, options))
+
+    monkeypatch.setattr(database, "projects_collection", RecordingCollection())
+
+    database.ensure_database_indexes()
+
+    assert calls == [
+        (
+            [("code", 1)],
+            {
+                "name": "projects_code_unique",
+                "unique": True,
+                "collation": {"locale": "en", "strength": 2},
+            },
+        )
+    ]
+
+
+def test_application_startup_ensures_database_indexes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app_main,
+        "ensure_database_indexes",
+        lambda: calls.append("created"),
+    )
+
+    async def run_lifespan():
+        async with app_main.lifespan(app_main.app):
+            pass
+
+    asyncio.run(run_lifespan())
+
+    assert calls == ["created"]
+
+
 def test_create_project_rejects_duplicate_key(
     monkeypatch, fake_collection, project_members
 ):
@@ -39,6 +91,29 @@ def test_create_project_rejects_duplicate_key(
 
     assert exc_info.value.status_code == 409
     assert len(projects.documents) == 1
+    assert project_members.documents == []
+
+
+def test_create_project_handles_unique_index_race(
+    monkeypatch, fake_collection, project_members
+):
+    class DuplicateOnInsertCollection(fake_collection.__class__):
+        def insert_one(self, document):
+            raise DuplicateKeyError("duplicate project key")
+
+    monkeypatch.setattr(
+        project,
+        "projects_collection",
+        DuplicateOnInsertCollection(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        project.create_project(
+            ProjectCreate(name="Concurrent", code="RACE"),
+            current_user={"_id": ObjectId(), "role": "super_admin"},
+        )
+
+    assert exc_info.value.status_code == 409
     assert project_members.documents == []
 
 
@@ -120,6 +195,33 @@ def test_update_project_rejects_duplicate_key(
     with pytest.raises(HTTPException) as exc_info:
         project.update_project(
             ProjectUpdate(code="TWO"),
+            str(project_id),
+            current_user={"_id": lead_id, "role": "user"},
+        )
+
+    assert exc_info.value.status_code == 409
+    assert projects.documents[0]["code"] == "ONE"
+
+
+def test_update_project_handles_unique_index_race(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_id = ObjectId()
+    lead_id = ObjectId()
+
+    class DuplicateOnUpdateCollection(fake_collection.__class__):
+        def update_one(self, query, update):
+            raise DuplicateKeyError("duplicate project key")
+
+    projects = DuplicateOnUpdateCollection(
+        [{"_id": project_id, "name": "One", "code": "ONE"}]
+    )
+    monkeypatch.setattr(project, "projects_collection", projects)
+    grant_project_role(project_id, lead_id, "lead")
+
+    with pytest.raises(HTTPException) as exc_info:
+        project.update_project(
+            ProjectUpdate(code="RACE"),
             str(project_id),
             current_user={"_id": lead_id, "role": "user"},
         )

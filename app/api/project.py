@@ -21,11 +21,11 @@ from app.db.db import (
 from app.decorator.super_admin import super_admin_required
 from app.models.project import (
     ProjectCreate,
-    ProjectMemberCreate,
     ProjectMemberRole,
     ProjectStatusAssign,
     ProjectUpdate,
 )
+from app.models.project_member import ProjectMemberCreate
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -169,10 +169,13 @@ def update_project(
 
     update_data["updated_at"] = datetime.now(timezone.utc)
     update_data["updated_by"] = str(current_user["_id"])
-    projects_collection.update_one(
-        {"_id": project_object_id},
-        {"$set": update_data},
-    )
+    try:
+        projects_collection.update_one(
+            {"_id": project_object_id},
+            {"$set": update_data},
+        )
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Project key already exists")
     return {"message": "Project updated"}
 
 
