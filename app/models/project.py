@@ -11,6 +11,33 @@ PROJECT_KEY_DESCRIPTION = (
 )
 
 
+class WorkflowGuard(BaseModel):
+    allowed_roles: List[ProjectRole] = Field(
+        default_factory=lambda: [ProjectRole.LEAD, ProjectRole.MEMBER],
+        min_length=1,
+    )
+    requires_assignee: bool = False
+
+
+class WorkflowTransition(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    from_status_id: str
+    to_status_id: str
+    guards: WorkflowGuard = Field(default_factory=WorkflowGuard)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Transition name cannot be blank")
+        return value
+
+
+class ProjectWorkflowUpdate(BaseModel):
+    transitions: List[WorkflowTransition] = Field(default_factory=list)
+
+
 class Project(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,6 +52,7 @@ class Project(BaseModel):
     total_tickets: int = 0
     assigned_statuses: List[str] = Field(default_factory=list)
     default_status_id: Optional[str] = None
+    workflow_transitions: List[WorkflowTransition] = Field(default_factory=list)
 
 
 class ProjectCreate(BaseModel):

@@ -38,17 +38,30 @@ def test_project_update_key_rejects_invalid_values(code):
 
 
 def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch):
-    calls = []
+    project_calls = []
+    issue_link_calls = []
 
     class RecordingCollection:
-        def create_index(self, keys, **options):
-            calls.append((keys, options))
+        def __init__(self, calls):
+            self.calls = calls
 
-    monkeypatch.setattr(database, "projects_collection", RecordingCollection())
+        def create_index(self, keys, **options):
+            self.calls.append((keys, options))
+
+    monkeypatch.setattr(
+        database,
+        "projects_collection",
+        RecordingCollection(project_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "issue_links_collection",
+        RecordingCollection(issue_link_calls),
+    )
 
     database.ensure_database_indexes()
 
-    assert calls == [
+    assert project_calls == [
         (
             [("code", 1)],
             {
@@ -57,6 +70,27 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
                 "collation": {"locale": "en", "strength": 2},
             },
         )
+    ]
+    assert issue_link_calls == [
+        (
+            [
+                ("from_ticket_id", 1),
+                ("to_ticket_id", 1),
+                ("link_type", 1),
+            ],
+            {
+                "name": "issue_links_from_to_type_unique",
+                "unique": True,
+            },
+        ),
+        (
+            [("from_ticket_id", 1)],
+            {"name": "issue_links_from_ticket"},
+        ),
+        (
+            [("to_ticket_id", 1)],
+            {"name": "issue_links_to_ticket"},
+        ),
     ]
 
 

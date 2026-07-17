@@ -208,6 +208,19 @@ class TestReopenTicket:
             ]
         )
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
+        monkeypatch.setattr(
+            ticket_mod,
+            "projects_collection",
+            fake_collection.__class__(
+                [
+                    {
+                        "_id": project_id,
+                        "assigned_statuses": [str(ObjectId()), str(ObjectId())],
+                        "default_status_id": str(ObjectId()),
+                    }
+                ]
+            ),
+        )
         grant_project_role(project_id, member_id, "member")
 
         with pytest.raises(HTTPException) as exc_info:
@@ -223,6 +236,8 @@ class TestReopenTicket:
         ticket_id = ObjectId()
         project_id = ObjectId()
         admin_id = ObjectId()
+        open_status_id = ObjectId()
+        closed_status_id = ObjectId()
         tickets = fake_collection.__class__(
             [
                 {
@@ -233,6 +248,23 @@ class TestReopenTicket:
             ]
         )
         monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
+        monkeypatch.setattr(
+            ticket_mod,
+            "projects_collection",
+            fake_collection.__class__(
+                [
+                    {
+                        "_id": project_id,
+                        "assigned_statuses": [
+                            str(open_status_id),
+                            str(closed_status_id),
+                        ],
+                        "default_status_id": str(open_status_id),
+                        "workflow_transitions": [],
+                    }
+                ]
+            ),
+        )
         grant_project_role(project_id, admin_id)
 
         with pytest.raises(HTTPException) as exc_info:

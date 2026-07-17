@@ -288,6 +288,13 @@ def test_reporter_cannot_change_ticket_status(
         "ticket_collection",
         fake_collection.__class__([{"_id": ticket_id, "project_id": str(project_id)}]),
     )
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__(
+            [{"_id": project_id, "assigned_statuses": [str(status_id)]}]
+        ),
+    )
     add_membership(project_members, project_id, reporter_id, "reporter")
 
     with pytest.raises(HTTPException) as exc_info:

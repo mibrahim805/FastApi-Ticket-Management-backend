@@ -1,8 +1,8 @@
 import enum
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Priority(str, enum.Enum):
@@ -35,6 +35,17 @@ class IssueType(str, enum.Enum):
     SUBTASK = "subtask"
 
 
+class IssueLinkType(str, enum.Enum):
+    BLOCKS = "blocks"
+    RELATES_TO = "relates_to"
+    DUPLICATES = "duplicates"
+
+
+class IssueLinkCreate(BaseModel):
+    to_ticket_id: str = Field(description="ID of the issue to link")
+    link_type: IssueLinkType
+
+
 class Ticket(BaseModel):
     project_id: str
     project_key: str
@@ -43,6 +54,10 @@ class Ticket(BaseModel):
     title: str
     description: str
     category: Category
+    issue_type: IssueType = IssueType.TASK
+    epic_id: Optional[str] = None
+    labels: List[str] = Field(default_factory=list)
+    watchers: List[str] = Field(default_factory=list)
     priority: Priority
     status: Status = Status.OPEN
     created_by: str
@@ -62,6 +77,11 @@ class TicketCreate(BaseModel):
     description: str
     category: Category
     issue_type: IssueType = IssueType.TASK
+    epic_id: Optional[str] = Field(
+        default=None,
+        description="ID of the epic that contains this issue",
+    )
+    labels: List[str] = Field(default_factory=list)
     priority: Priority
     # created_at: datetime = datetime.now()
     # due_date: datetime
@@ -83,3 +103,38 @@ class TicketStatusMove(BaseModel):
     target_status_id: Optional[str] = None
     target_status_name: Optional[str] = None
     # comment: Optional[str] = None
+
+
+class TicketTransitionRequest(BaseModel):
+    transition_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("transition_name")
+    @classmethod
+    def validate_transition_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("transition_name cannot be blank")
+        return value
+
+
+class BulkTransitionRequest(TicketTransitionRequest):
+    ticket_ids: List[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def validate_unique_ticket_ids(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("ticket_ids must be unique")
+        return value
+
+
+class BulkAssignRequest(BaseModel):
+    ticket_ids: List[str] = Field(min_length=1, max_length=100)
+    agent_id: str
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def validate_unique_ticket_ids(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("ticket_ids must be unique")
+        return value

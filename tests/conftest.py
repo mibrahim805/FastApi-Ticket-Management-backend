@@ -26,6 +26,13 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
             if document.get(key) not in expected["$in"]:
                 return False
             continue
+        if isinstance(expected, dict) and "$all" in expected:
+            value = document.get(key)
+            if not isinstance(value, list) or not all(
+                item in value for item in expected["$all"]
+            ):
+                return False
+            continue
         if document.get(key) != expected:
             return False
     return True
@@ -108,6 +115,22 @@ class FakeCollection:
                 if "$unset" in update:
                     for key in update["$unset"]:
                         document.pop(key, None)
+                if "$addToSet" in update:
+                    for key, value in update["$addToSet"].items():
+                        values = (
+                            value.get("$each", [])
+                            if isinstance(value, dict)
+                            else [value]
+                        )
+                        target = document.setdefault(key, [])
+                        for item in values:
+                            if item not in target:
+                                target.append(item)
+                if "$pull" in update:
+                    for key, value in update["$pull"].items():
+                        document[key] = [
+                            item for item in document.get(key, []) if item != value
+                        ]
                 self.updated_documents.append((query, update))
                 return
 
@@ -169,6 +192,16 @@ def project_members(fake_collection):
 
 
 @pytest.fixture
+def issue_links(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
+def ticket_activities(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def grant_project_role(project_members):
     def grant(project_id, user_id, role="lead"):
         project_object_id = (
@@ -201,6 +234,32 @@ def isolate_project_members_collection(monkeypatch, project_members):
             monkeypatch.setattr(module, "project_members_collection", project_members)
 
     return project_members
+
+
+@pytest.fixture(autouse=True)
+def isolate_issue_links_collection(monkeypatch, issue_links):
+    for module_name in (
+        "app.db.db",
+        "app.api.ticket",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "issue_links_collection"):
+            monkeypatch.setattr(module, "issue_links_collection", issue_links)
+
+    return issue_links
+
+
+@pytest.fixture(autouse=True)
+def isolate_ticket_activity_collection(monkeypatch, ticket_activities):
+    module = sys.modules.get("app.api.activity")
+    if module is not None:
+        monkeypatch.setattr(
+            module,
+            "ticket_activity_collection",
+            ticket_activities,
+        )
+
+    return ticket_activities
 
 
 def test_matches_returns_false_when_no_or_clause_matches():
