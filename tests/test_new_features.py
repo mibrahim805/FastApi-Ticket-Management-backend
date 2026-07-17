@@ -3,6 +3,7 @@
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.api import notifications as notif_mod
 from app.api import reports as reports_mod
@@ -178,176 +179,13 @@ class TestReportsEndpoints:
         assert response["by_priority"] == {}
 
 
-class TestReopenTicket:
-    """Test ticket reopen functionality"""
-
-    def test_reopen_ticket_not_found(self, monkeypatch, fake_collection):
-        admin_id = ObjectId()
-        monkeypatch.setattr(ticket_mod, "ticket_collection", fake_collection)
-
-        with pytest.raises(HTTPException) as exc_info:
-            ticket_mod.reopen_ticket(
-                str(ObjectId()), current_user={"_id": admin_id, "role": "super_admin"}
-            )
-
-        assert exc_info.value.status_code == 404
-
-    def test_reopen_ticket_unauthorized(
-        self, monkeypatch, fake_collection, grant_project_role
-    ):
-        ticket_id = ObjectId()
-        project_id = ObjectId()
-        member_id = ObjectId()
-        tickets = fake_collection.__class__(
-            [
-                {
-                    "_id": ticket_id,
-                    "project_id": str(project_id),
-                    "current_status_name": "closed",
-                }
-            ]
+def test_general_ticket_update_rejects_status_and_assignment_fields():
+    with pytest.raises(ValidationError):
+        TicketUpdate(
+            status="in_progress",
+            assigned_to="agent",
+            priority="high",
         )
-        monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
-        monkeypatch.setattr(
-            ticket_mod,
-            "projects_collection",
-            fake_collection.__class__(
-                [
-                    {
-                        "_id": project_id,
-                        "assigned_statuses": [str(ObjectId()), str(ObjectId())],
-                        "default_status_id": str(ObjectId()),
-                    }
-                ]
-            ),
-        )
-        grant_project_role(project_id, member_id, "member")
-
-        with pytest.raises(HTTPException) as exc_info:
-            ticket_mod.reopen_ticket(
-                str(ticket_id), current_user={"_id": member_id, "role": "agent"}
-            )
-
-        assert exc_info.value.status_code == 403
-
-    def test_reopen_ticket_invalid_status(
-        self, monkeypatch, fake_collection, grant_project_role
-    ):
-        ticket_id = ObjectId()
-        project_id = ObjectId()
-        admin_id = ObjectId()
-        open_status_id = ObjectId()
-        closed_status_id = ObjectId()
-        tickets = fake_collection.__class__(
-            [
-                {
-                    "_id": ticket_id,
-                    "project_id": str(project_id),
-                    "current_status_name": "open",
-                }
-            ]
-        )
-        monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
-        monkeypatch.setattr(
-            ticket_mod,
-            "projects_collection",
-            fake_collection.__class__(
-                [
-                    {
-                        "_id": project_id,
-                        "assigned_statuses": [
-                            str(open_status_id),
-                            str(closed_status_id),
-                        ],
-                        "default_status_id": str(open_status_id),
-                        "workflow_transitions": [],
-                    }
-                ]
-            ),
-        )
-        grant_project_role(project_id, admin_id)
-
-        with pytest.raises(HTTPException) as exc_info:
-            ticket_mod.reopen_ticket(
-                str(ticket_id), current_user={"_id": admin_id, "role": "super_admin"}
-            )
-
-        assert exc_info.value.status_code == 400
-
-
-class TestAssignBeforeInProgress:
-    """Test validation that tickets must be assigned before moving to IN_PROGRESS"""
-
-    def test_update_to_in_progress_without_assignment_fails(
-        self, monkeypatch, fake_collection, grant_project_role
-    ):
-        ticket_id = ObjectId()
-        project_id = ObjectId()
-        user_id = ObjectId()
-        tickets = fake_collection.__class__(
-            [
-                {
-                    "_id": ticket_id,
-                    "project_id": str(project_id),
-                    "userId": str(user_id),
-                    "title": "Test",
-                    "assigned_agent": None,
-                }
-            ]
-        )
-        notifications = fake_collection.__class__()
-
-        monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
-        monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
-        monkeypatch.setattr(ticket_mod, "log_activity", lambda **kwargs: None)
-        grant_project_role(project_id, user_id, "member")
-
-        upd = TicketUpdate(
-            status="in_progress", priority="high", category="bug", assigned_to="agent"
-        )
-
-        with pytest.raises(HTTPException) as exc_info:
-            ticket_mod.update_ticket(
-                str(ticket_id), upd, current_user={"_id": user_id, "role": "agent"}
-            )
-
-        assert exc_info.value.status_code == 400
-        assert "assigned" in exc_info.value.detail.lower()
-
-    def test_update_to_in_progress_with_assignment_succeeds(
-        self, monkeypatch, fake_collection, grant_project_role
-    ):
-        ticket_id = ObjectId()
-        project_id = ObjectId()
-        user_id = ObjectId()
-        agent_id = ObjectId()
-        tickets = fake_collection.__class__(
-            [
-                {
-                    "_id": ticket_id,
-                    "project_id": str(project_id),
-                    "userId": str(user_id),
-                    "title": "Test",
-                    "assigned_agent": str(agent_id),
-                }
-            ]
-        )
-        notifications = fake_collection.__class__()
-
-        monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
-        monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
-        monkeypatch.setattr(ticket_mod, "log_activity", lambda **kwargs: None)
-        grant_project_role(project_id, user_id, "member")
-
-        upd = TicketUpdate(
-            status="in_progress", priority="high", category="bug", assigned_to="agent"
-        )
-
-        response = ticket_mod.update_ticket(
-            str(ticket_id), upd, current_user={"_id": user_id, "role": "agent"}
-        )
-
-        assert response["message"] == "Ticket updated successfully"
 
 
 class TestOverdueFilter:

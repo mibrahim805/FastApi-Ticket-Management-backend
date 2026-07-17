@@ -13,6 +13,7 @@ def test_create_ticket_link_persists_supported_link_types(
     monkeypatch,
     fake_collection,
     issue_links,
+    ticket_activities,
     grant_project_role,
     link_type,
 ):
@@ -45,6 +46,10 @@ def test_create_ticket_link_persists_supported_link_types(
         "to_ticket_id": str(to_ticket_id),
         "link_type": link_type.value,
     }
+    assert [activity["action"] for activity in ticket_activities.documents] == [
+        "issue_link_created",
+        "issue_link_created",
+    ]
 
 
 def test_create_ticket_link_rejects_duplicate(
@@ -241,7 +246,11 @@ def test_get_ticket_links_returns_incoming_and_outgoing_links(
 
 
 def test_delete_ticket_removes_associated_issue_links(
-    monkeypatch, fake_collection, issue_links, grant_project_role
+    monkeypatch,
+    fake_collection,
+    issue_links,
+    ticket_activities,
+    grant_project_role,
 ):
     project_id = ObjectId()
     ticket_id = ObjectId()
@@ -291,6 +300,7 @@ def test_delete_ticket_removes_associated_issue_links(
     assert len(issue_links.documents) == 1
     assert issue_links.documents[0]["from_ticket_id"] == str(other_ticket_id)
     assert issue_links.documents[0]["to_ticket_id"] == str(third_ticket_id)
+    assert ticket_activities.documents[-1]["action"] == "ticket_deleted"
 
 
 def test_issue_link_routes_and_enum_are_exposed_in_openapi():

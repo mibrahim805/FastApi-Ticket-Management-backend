@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import parse_object_id, require_ticket_membership
 from app.api.watcher_notifications import notify_ticket_watchers
@@ -47,6 +48,21 @@ def create_comment(
         "visibility": comment.visibility,
     }
     result = comments_collection.insert_one(new_comment)
+    log_activity(
+        ticket_id=ticket_id,
+        action="comment_created",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "comment",
+                "old_value": None,
+                "new_value": {
+                    "comment_id": str(result.inserted_id),
+                    "visibility": comment.visibility,
+                },
+            }
+        ],
+    )
     notification = Notifications(
         ticket_id=ticket_id,
         comment_id=str(result.inserted_id),

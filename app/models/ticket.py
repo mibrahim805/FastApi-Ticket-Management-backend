@@ -2,7 +2,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Priority(str, enum.Enum):
@@ -88,37 +88,23 @@ class TicketCreate(BaseModel):
 
 
 class TicketUpdate(BaseModel):
-    status: str
-    priority: str
-    category: str
-    assigned_to: str
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    category: Optional[str] = None
+    labels: Optional[List[str]] = None
+    due_date: Optional[datetime] = None
 
 
 class AssignAgent(BaseModel):
     agent_id: str
 
 
-class TicketStatusMove(BaseModel):
-    # direction: Optional[Literal["forward", "backward"]] = None
-    target_status_id: Optional[str] = None
-    target_status_name: Optional[str] = None
-    # comment: Optional[str] = None
-
-
-class TicketTransitionRequest(BaseModel):
-    transition_name: str = Field(min_length=1, max_length=100)
-
-    @field_validator("transition_name")
-    @classmethod
-    def validate_transition_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("transition_name cannot be blank")
-        return value
-
-
-class BulkTransitionRequest(TicketTransitionRequest):
+class BulkTransitionRequest(BaseModel):
     ticket_ids: List[str] = Field(min_length=1, max_length=100)
+    transition_id: str
 
     @field_validator("ticket_ids")
     @classmethod

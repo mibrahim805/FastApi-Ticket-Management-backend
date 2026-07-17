@@ -267,9 +267,7 @@ def test_ticket_get_update_summary_delete(
             "assigned_agent": str(ObjectId()),
         }
     ).inserted_id
-    upd = TicketUpdate(
-        status="in_progress", priority="high", category="bug", assigned_to="agent"
-    )
+    upd = TicketUpdate(priority="high", category="bug")
     grant_project_role(update_project_id, t_owner, "member")
     resp2 = ticket_mod.update_ticket(
         str(tid2), upd, current_user={"_id": t_owner, "role": "agent"}

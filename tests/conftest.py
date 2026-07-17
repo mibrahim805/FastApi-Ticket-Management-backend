@@ -197,6 +197,11 @@ def issue_links(fake_collection):
 
 
 @pytest.fixture
+def transitions(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def ticket_activities(fake_collection):
     return fake_collection.__class__()
 
@@ -247,6 +252,20 @@ def isolate_issue_links_collection(monkeypatch, issue_links):
             monkeypatch.setattr(module, "issue_links_collection", issue_links)
 
     return issue_links
+
+
+@pytest.fixture(autouse=True)
+def isolate_transitions_collection(monkeypatch, transitions):
+    for module_name in (
+        "app.db.db",
+        "app.api.project",
+        "app.api.ticket",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "transitions_collection"):
+            monkeypatch.setattr(module, "transitions_collection", transitions)
+
+    return transitions
 
 
 @pytest.fixture(autouse=True)

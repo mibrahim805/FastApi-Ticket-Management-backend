@@ -29,6 +29,7 @@ from app.db.db import (
     projects_collection,
     statuses_collection,
     ticket_collection,
+    transitions_collection,
     user_collection,
 )
 from app.models.notifications import Notifications
@@ -40,14 +41,16 @@ from app.models.ticket import (
     IssueLinkCreate,
     IssueType,
     TicketCreate,
-    TicketStatusMove,
-    TicketTransitionRequest,
     TicketUpdate,
 )
 
 router = APIRouter()
 
 DONE_STATUS_NAMES = frozenset({"done", "closed", "resolved"})
+
+
+def normalize_status_name(name: str) -> str:
+    return re.sub(r"[\s-]+", "_", name.strip().lower())
 
 
 def _parse_object_id(value: str, field_name: str) -> ObjectId:
@@ -78,6 +81,15 @@ def _serialize_issue_link(link: dict) -> dict:
     serialized = dict(link)
     if isinstance(serialized.get("_id"), ObjectId):
         serialized["_id"] = str(serialized["_id"])
+    return serialized
+
+
+def _serialize_transition(transition: dict) -> dict:
+    serialized = dict(transition)
+    if isinstance(serialized.get("_id"), ObjectId):
+        serialized["_id"] = str(serialized["_id"])
+    if isinstance(serialized.get("project_id"), ObjectId):
+        serialized["project_id"] = str(serialized["project_id"])
     return serialized
 
 
@@ -123,8 +135,9 @@ def _get_ticket_project(ticket: dict) -> tuple[ObjectId, dict]:
 def _outgoing_transitions(project: dict, current_status_id: str) -> list[dict]:
     return [
         transition
-        for transition in project.get("workflow_transitions", [])
-        if str(transition.get("from_status_id")) == str(current_status_id)
+        for transition in transitions_collection.find({"project_id": project["_id"]})
+        if str(current_status_id)
+        in {str(status_id) for status_id in transition.get("from_status_ids", [])}
     ]
 
 
@@ -133,17 +146,17 @@ def _transition_guard_error(
     ticket: dict,
     membership: dict,
 ) -> tuple[int, str] | None:
-    guards = transition.get("guards", {})
+    guard = transition.get("guard", {})
     allowed_roles = {
         role.value if isinstance(role, ProjectRole) else role
-        for role in guards.get(
+        for role in guard.get(
             "allowed_roles",
             [ProjectRole.LEAD.value, ProjectRole.MEMBER.value],
         )
     }
     if membership.get("role") not in allowed_roles:
         return 403, "Your project role cannot use this transition"
-    if guards.get("requires_assignee") and not ticket.get("assigned_agent"):
+    if guard.get("requires_assignee") and not ticket.get("assigned_agent"):
         return 400, "Ticket must be assigned before using this transition"
     return None
 
@@ -161,16 +174,28 @@ def _apply_ticket_transition(
         current_user,
         project_members_collection,
     )
+    transition_project_id = transition.get("project_id")
+    if transition_project_id is not None and str(transition_project_id) != str(
+        project["_id"]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Transition belongs to a different project",
+        )
+
+    allowed_sources = {
+        str(status_id) for status_id in transition.get("from_status_ids", [])
+    }
+    if str(ticket.get("current_status_id")) not in allowed_sources:
+        raise HTTPException(
+            status_code=400,
+            detail="Ticket's current status is not an allowed transition source",
+        )
+
     guard_error = _transition_guard_error(transition, ticket, membership)
     if guard_error:
         status_code, detail = guard_error
         raise HTTPException(status_code=status_code, detail=detail)
-
-    if str(transition.get("from_status_id")) != str(ticket.get("current_status_id")):
-        raise HTTPException(
-            status_code=409,
-            detail="Ticket status changed before the transition could be applied",
-        )
 
     target_status_id = str(transition.get("to_status_id"))
     assigned_statuses = [
@@ -237,15 +262,21 @@ def _apply_ticket_transition(
         changed_by=current_user["_id"],
         changes=[
             {
-                "field": "status",
+                "field": "current_status_id",
+                "old_value": ticket.get("current_status_id"),
+                "new_value": target_status_id,
+            },
+            {
+                "field": "current_status_name",
                 "old_value": ticket.get("current_status_name"),
                 "new_value": target_status["name"],
-            }
+            },
         ],
     )
     return {
         "ticket_id": str(ticket_object_id),
         "ticket_code": ticket.get("ticket_code"),
+        "transition_id": str(transition.get("_id")),
         "transition": transition.get("name"),
         "previous_status": ticket.get("current_status_name"),
         "current_status": target_status["name"],
@@ -253,9 +284,9 @@ def _apply_ticket_transition(
     }
 
 
-def _run_named_transition(
+def _run_transition_by_id(
     ticket_id: str,
-    transition_name: str,
+    transition_id: str,
     current_user: dict,
 ) -> dict:
     ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
@@ -265,26 +296,15 @@ def _run_named_transition(
         project_members_collection,
     )
     _, project = _get_ticket_project(ticket)
-    matches = [
-        transition
-        for transition in _outgoing_transitions(
-            project,
-            ticket.get("current_status_id"),
-        )
-        if transition.get("name", "").casefold() == transition_name.casefold()
-    ]
-    if not matches:
-        raise HTTPException(status_code=400, detail="Transition is not available")
-    if len(matches) > 1:
-        raise HTTPException(
-            status_code=409,
-            detail="Transition name is ambiguous for the current status",
-        )
+    transition_object_id = _parse_object_id(transition_id, "transition_id")
+    transition = transitions_collection.find_one({"_id": transition_object_id})
+    if not transition:
+        raise HTTPException(status_code=404, detail="Transition not found")
     return _apply_ticket_transition(
         ticket_object_id=ticket_object_id,
         ticket=ticket,
         project=project,
-        transition=matches[0],
+        transition=transition,
         current_user=current_user,
     )
 
@@ -524,9 +544,24 @@ def subscribe_to_ticket(
         {"$addToSet": {"watchers": watcher_id}},
     )
     updated_ticket = ticket_collection.find_one({"_id": ticket_object_id})
+    old_watchers = ticket.get("watchers", [])
+    new_watchers = updated_ticket.get("watchers", [])
+    if old_watchers != new_watchers:
+        log_activity(
+            ticket_id=ticket_id,
+            action="watcher_subscribed",
+            changed_by=current_user["_id"],
+            changes=[
+                {
+                    "field": "watchers",
+                    "old_value": old_watchers,
+                    "new_value": new_watchers,
+                }
+            ],
+        )
     return {
         "message": "Subscribed to ticket",
-        "watchers": updated_ticket.get("watchers", []),
+        "watchers": new_watchers,
     }
 
 
@@ -547,9 +582,24 @@ def unsubscribe_from_ticket(
         {"$pull": {"watchers": watcher_id}},
     )
     updated_ticket = ticket_collection.find_one({"_id": ticket_object_id})
+    old_watchers = ticket.get("watchers", [])
+    new_watchers = updated_ticket.get("watchers", [])
+    if old_watchers != new_watchers:
+        log_activity(
+            ticket_id=ticket_id,
+            action="watcher_unsubscribed",
+            changed_by=current_user["_id"],
+            changes=[
+                {
+                    "field": "watchers",
+                    "old_value": old_watchers,
+                    "new_value": new_watchers,
+                }
+            ],
+        )
     return {
         "message": "Unsubscribed from ticket",
-        "watchers": updated_ticket.get("watchers", []),
+        "watchers": new_watchers,
     }
 
 
@@ -581,7 +631,7 @@ def get_ticket_transitions(
         guard_error = _transition_guard_error(transition, ticket, membership)
         transitions.append(
             {
-                **transition,
+                **_serialize_transition(transition),
                 "to_status_name": target_status.get("name") if target_status else None,
                 "available": guard_error is None and target_status is not None,
                 "blocked_reason": guard_error[1] if guard_error else None,
@@ -590,15 +640,15 @@ def get_ticket_transitions(
     return {"transitions": transitions}
 
 
-@router.post("/tickets/{ticket_id}/transitions", tags=["Tickets"])
+@router.post("/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])
 def transition_ticket(
     ticket_id: str,
-    payload: TicketTransitionRequest,
+    transition_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    return _run_named_transition(
+    return _run_transition_by_id(
         ticket_id,
-        payload.transition_name,
+        transition_id,
         current_user,
     )
 
@@ -647,6 +697,38 @@ def create_ticket_link(
         raise HTTPException(status_code=409, detail="Issue link already exists")
 
     link["_id"] = result.inserted_id
+    log_activity(
+        ticket_id=str(from_ticket_object_id),
+        action="issue_link_created",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "outgoing_issue_link",
+                "old_value": None,
+                "new_value": {
+                    "link_id": str(result.inserted_id),
+                    "ticket_id": str(to_ticket_object_id),
+                    "link_type": payload.link_type.value,
+                },
+            }
+        ],
+    )
+    log_activity(
+        ticket_id=str(to_ticket_object_id),
+        action="issue_link_created",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "incoming_issue_link",
+                "old_value": None,
+                "new_value": {
+                    "link_id": str(result.inserted_id),
+                    "ticket_id": str(from_ticket_object_id),
+                    "link_type": payload.link_type.value,
+                },
+            }
+        ],
+    )
     notify_ticket_watchers(
         ticket=from_ticket,
         ticket_id=str(from_ticket_object_id),
@@ -706,16 +788,21 @@ def update_ticket(
         role_detail="Only project leads or members can update tickets",
     )
 
-    if data.status and data.status.lower() == "in_progress":
-        if not ticket.get("assigned_agent"):
-            raise HTTPException(
-                status_code=400,
-                detail="Ticket must be assigned before moving to IN_PROGRESS",
-            )
-
     update_data = data.model_dump(exclude_none=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No ticket fields supplied")
+
+    changes = [
+        {
+            "field": field,
+            "old_value": ticket.get(field),
+            "new_value": value,
+        }
+        for field, value in update_data.items()
+        if ticket.get(field) != value
+    ]
     update_data["updated_by"] = str(current_user["_id"])
-    update_data["updated_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.now(timezone.utc)
     ticket_collection.update_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
     )
@@ -734,30 +821,6 @@ def update_ticket(
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
     )
-    new_ticket = ticket_collection.find_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}
-    )
-    TRACKED_FIELDS = [
-        "title",
-        "description",
-        "priority",
-        "status",
-        "category",
-        "assigned_to",
-        "due_date",
-    ]
-
-    changes = []
-
-    for field in TRACKED_FIELDS:
-        if ticket.get(field) != new_ticket.get(field):
-            changes.append(
-                {
-                    "field": field,
-                    "old_value": ticket.get(field),
-                    "new_value": new_ticket.get(field),
-                }
-            )
     if changes:
         log_activity(
             ticket_id=ticket_id,
@@ -821,8 +884,22 @@ def assign_ticket(
             "$set": {
                 "assigned_agent": data.agent_id,
                 "updated_by": str(current_user["_id"]),
+                "updated_at": datetime.now(timezone.utc),
             }
         },
+    )
+
+    log_activity(
+        ticket_id=ticket_id,
+        action="ticket_assigned",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "assigned_agent",
+                "old_value": ticket.get("assigned_agent"),
+                "new_value": data.agent_id,
+            }
+        ],
     )
 
     notification = Notifications(
@@ -880,9 +957,9 @@ def bulk_transition_tickets(
     failed = []
     for ticket_id in payload.ticket_ids:
         try:
-            result = _run_named_transition(
+            result = _run_transition_by_id(
                 ticket_id,
-                payload.transition_name,
+                payload.transition_id,
                 current_user,
             )
         except HTTPException as error:
@@ -1149,6 +1226,18 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
     )
+    log_activity(
+        ticket_id=ticket_id,
+        action="ticket_deleted",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "ticket",
+                "old_value": ticket.get("ticket_code", ticket_id),
+                "new_value": None,
+            }
+        ],
+    )
     ticket_collection.delete_one({"_id": ticket_object_id})
     issue_links_collection.delete_many(
         {
@@ -1167,261 +1256,3 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
     notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Ticket deleted successfully"}
-
-
-@router.patch("/{ticket_id}/move-forward", tags=["Tickets"])
-def move_ticket_forward(
-    ticket_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
-    require_ticket_membership(
-        ticket,
-        current_user,
-        project_members_collection,
-    )
-    _, project = _get_ticket_project(ticket)
-
-    configured_transitions = project.get("workflow_transitions", [])
-    if configured_transitions:
-        outgoing = _outgoing_transitions(project, ticket.get("current_status_id"))
-        if not outgoing:
-            raise HTTPException(
-                status_code=400,
-                detail="No workflow transition is available from the current status",
-            )
-        if len(outgoing) > 1:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Multiple workflow transitions are available; "
-                    "use the named transition endpoint"
-                ),
-            )
-        return _apply_ticket_transition(
-            ticket_object_id=ticket_object_id,
-            ticket=ticket,
-            project=project,
-            transition=outgoing[0],
-            current_user=current_user,
-        )
-
-    require_ticket_membership(
-        ticket,
-        current_user,
-        project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
-        role_detail="Only project leads or members can move tickets",
-    )
-
-    assigned_statuses = project.get("assigned_statuses", [])
-    if not assigned_statuses:
-        raise HTTPException(status_code=400, detail="Project has no statuses assigned")
-
-    current_status_id = ticket["current_status_id"]
-    if current_status_id not in assigned_statuses:
-        raise HTTPException(
-            status_code=400,
-            detail="Ticket's current status is not in this project's statuses",
-        )
-
-    current_index = assigned_statuses.index(current_status_id)
-
-    if current_index == len(assigned_statuses) - 1:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Ticket is already at the last status "
-                f"'{ticket['current_status_name']}'. "
-                "No further movement allowed."
-            ),
-        )
-
-    next_status_id = assigned_statuses[current_index + 1]
-    next_status = statuses_collection.find_one(
-        {"_id": _parse_object_id(next_status_id, "status_id")}
-    )
-    if not next_status:
-        raise HTTPException(status_code=404, detail="Next status not found")
-
-    legacy_transition = {
-        "name": f"Move to {next_status['name']}",
-        "from_status_id": current_status_id,
-        "to_status_id": next_status_id,
-        "guards": {
-            "allowed_roles": list(PROJECT_WORK_ROLES),
-            "requires_assignee": (
-                normalize_status_name(next_status["name"]) == "in_progress"
-            ),
-        },
-    }
-    return _apply_ticket_transition(
-        ticket_object_id=ticket_object_id,
-        ticket=ticket,
-        project=project,
-        transition=legacy_transition,
-        current_user=current_user,
-    )
-
-
-def normalize_status_name(name: str) -> str:
-    return re.sub(r"[\s-]+", "_", name.strip().lower())
-
-
-@router.patch("/tickets/{ticket_id}/status", tags=["Tickets"])
-def move_ticket_status(
-    ticket_id: str,
-    payload: TicketStatusMove,
-    current_user: dict = Depends(get_current_user),
-):
-    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
-    require_ticket_membership(
-        ticket,
-        current_user,
-        project_members_collection,
-    )
-    _, project = _get_ticket_project(ticket)
-
-    configured_transitions = project.get("workflow_transitions", [])
-    if not configured_transitions:
-        require_ticket_membership(
-            ticket,
-            current_user,
-            project_members_collection,
-            allowed_roles=PROJECT_WORK_ROLES,
-            role_detail="Only project leads or members can change ticket status",
-        )
-
-    requested_statuses = [
-        bool(payload.target_status_id),
-        bool(payload.target_status_name and payload.target_status_name.strip()),
-    ]
-    if sum(requested_statuses) != 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide exactly one of target_status_id or target_status_name",
-        )
-
-    if payload.target_status_id:
-        status_object_id = _parse_object_id(payload.target_status_id, "status_id")
-        target_status = statuses_collection.find_one({"_id": status_object_id})
-    else:
-        target_status = statuses_collection.find_one(
-            {
-                "name": {
-                    "$regex": re.compile(
-                        f"^{re.escape(payload.target_status_name.strip())}$",
-                        re.IGNORECASE,
-                    )
-                }
-            }
-        )
-
-    if not target_status:
-        raise HTTPException(status_code=404, detail="Status not found")
-
-    if str(target_status["_id"]) not in project.get("assigned_statuses", []):
-        raise HTTPException(
-            status_code=400,
-            detail="Target status is not assigned to this project",
-        )
-
-    target_status_id = str(target_status["_id"])
-    if configured_transitions:
-        matches = [
-            transition
-            for transition in _outgoing_transitions(
-                project,
-                ticket.get("current_status_id"),
-            )
-            if str(transition.get("to_status_id")) == target_status_id
-        ]
-        if not matches:
-            raise HTTPException(
-                status_code=400,
-                detail="No workflow transition reaches the requested status",
-            )
-        if len(matches) > 1:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Multiple workflow transitions reach that status; "
-                    "use the named transition endpoint"
-                ),
-            )
-        transition = matches[0]
-    else:
-        transition = {
-            "name": f"Move to {target_status['name']}",
-            "from_status_id": ticket.get("current_status_id"),
-            "to_status_id": target_status_id,
-            "guards": {
-                "allowed_roles": list(PROJECT_WORK_ROLES),
-                "requires_assignee": (
-                    normalize_status_name(target_status["name"]) == "in_progress"
-                ),
-            },
-        }
-
-    _apply_ticket_transition(
-        ticket_object_id=ticket_object_id,
-        ticket=ticket,
-        project=project,
-        transition=transition,
-        current_user=current_user,
-    )
-    return {"message": "Ticket status updated successfully"}
-
-
-@router.put("/tickets/{ticket_id}/reopen", tags=["Tickets"])
-def reopen_ticket(
-    ticket_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
-    require_ticket_membership(
-        ticket,
-        current_user,
-        project_members_collection,
-    )
-    _, project = _get_ticket_project(ticket)
-
-    configured_transitions = project.get("workflow_transitions", [])
-    if configured_transitions:
-        return _run_named_transition(ticket_id, "Reopen", current_user)
-
-    if normalize_status_name(ticket.get("current_status_name", "")) not in {
-        "closed",
-        "resolved",
-        "done",
-    }:
-        raise HTTPException(
-            status_code=400,
-            detail="Only closed or resolved tickets can be reopened",
-        )
-    default_status_id = project.get("default_status_id")
-    if not default_status_id:
-        assigned_statuses = project.get("assigned_statuses", [])
-        default_status_id = assigned_statuses[0] if assigned_statuses else None
-    if not default_status_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Project has no default status for reopening tickets",
-        )
-    transition = {
-        "name": "Reopen",
-        "from_status_id": ticket.get("current_status_id"),
-        "to_status_id": str(default_status_id),
-        "guards": {
-            "allowed_roles": [ProjectRole.LEAD.value],
-            "requires_assignee": False,
-        },
-    }
-
-    return _apply_ticket_transition(
-        ticket_object_id=ticket_object_id,
-        ticket=ticket,
-        project=project,
-        transition=transition,
-        current_user=current_user,
-    )

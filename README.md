@@ -63,7 +63,11 @@ OMS-3
 
 Global statuses can be created and assigned to projects.
 
-Example Workflow:
+Projects define named transition graphs over their assigned statuses. A transition
+can accept multiple source statuses and can restrict execution by project role or
+require an assignee.
+
+Example workflow:
 
 ```
 Open
@@ -260,6 +264,8 @@ Authorization: Bearer <your_token>
 | PUT | /projects/{project_id} |
 | DELETE | /projects/{project_id} |
 | PATCH | /projects/{project_id}/statuses |
+| GET | /projects/{project_id}/workflow |
+| PUT | /projects/{project_id}/workflow |
 | POST | /projects/{project_id}/members |
 | GET | /projects/{project_id}/members |
 
@@ -269,10 +275,10 @@ Authorization: Bearer <your_token>
 
 | Method | Endpoint |
 |---------|----------|
-| POST | /status |
-| GET | /status |
-| PUT | /status/{id} |
-| DELETE | /status/{id} |
+| POST | /statuses/ |
+| GET | /statuses/ |
+| PATCH | /statuses/{id} |
+| DELETE | /statuses/{id} |
 
 ---
 
@@ -285,6 +291,8 @@ Authorization: Bearer <your_token>
 | GET | /tickets/{id} |
 | PUT | /tickets/{id} |
 | DELETE | /tickets/{id} |
+| GET | /tickets/{ticket_id}/transitions |
+| POST | /{ticket_id}/transitions/{transition_id} |
 
 ---
 
@@ -317,6 +325,8 @@ project_members
 
 statuses
 
+transitions
+
 tickets
 
 comments
@@ -325,7 +335,8 @@ notifications
 ```
 
 Projects are stored in `projects`, memberships in `project_members`, and tickets
-reference their project using `project_id` and `project_key`.
+reference their project using `project_id` and `project_key`. Named workflow
+transitions are stored separately in `transitions` and reference their project.
 
 This is a breaking storage-schema change for databases created by earlier
 versions. Migrate existing collections and reference fields before deployment.

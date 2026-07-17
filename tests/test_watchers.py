@@ -10,6 +10,7 @@ from app.models.comment import Comment
 def test_subscribe_and_unsubscribe_are_idempotent(
     monkeypatch,
     fake_collection,
+    ticket_activities,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -45,6 +46,10 @@ def test_subscribe_and_unsubscribe_are_idempotent(
 
     assert first_unsubscribe["watchers"] == []
     assert second_unsubscribe["watchers"] == []
+    assert [activity["action"] for activity in ticket_activities.documents] == [
+        "watcher_subscribed",
+        "watcher_unsubscribed",
+    ]
 
 
 def test_non_member_cannot_subscribe(monkeypatch, fake_collection):
@@ -68,6 +73,7 @@ def test_non_member_cannot_subscribe(monkeypatch, fake_collection):
 def test_ticket_transition_notifies_watchers_except_actor(
     monkeypatch,
     fake_collection,
+    transitions,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -76,6 +82,7 @@ def test_ticket_transition_notifies_watchers_except_actor(
     done_status_id = ObjectId()
     actor_id = ObjectId()
     watcher_id = ObjectId()
+    transition_id = ObjectId()
     projects = fake_collection.__class__(
         [
             {
@@ -84,19 +91,21 @@ def test_ticket_transition_notifies_watchers_except_actor(
                     str(open_status_id),
                     str(done_status_id),
                 ],
-                "workflow_transitions": [
-                    {
-                        "name": "Complete",
-                        "from_status_id": str(open_status_id),
-                        "to_status_id": str(done_status_id),
-                        "guards": {
-                            "allowed_roles": ["member"],
-                            "requires_assignee": False,
-                        },
-                    }
-                ],
             }
         ]
+    )
+    transitions.insert_one(
+        {
+            "_id": transition_id,
+            "project_id": project_id,
+            "name": "Complete",
+            "from_status_ids": [str(open_status_id)],
+            "to_status_id": str(done_status_id),
+            "guard": {
+                "allowed_roles": ["member"],
+                "requires_assignee": False,
+            },
+        }
     )
     statuses = fake_collection.__class__([{"_id": done_status_id, "name": "Done"}])
     tickets = fake_collection.__class__(
@@ -120,7 +129,7 @@ def test_ticket_transition_notifies_watchers_except_actor(
 
     ticket.transition_ticket(
         str(ticket_id),
-        ticket.TicketTransitionRequest(transition_name="Complete"),
+        str(transition_id),
         current_user={"_id": actor_id, "role": "agent"},
     )
 
@@ -133,6 +142,7 @@ def test_ticket_transition_notifies_watchers_except_actor(
 def test_comment_notifies_ticket_watchers(
     monkeypatch,
     fake_collection,
+    ticket_activities,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -167,6 +177,7 @@ def test_comment_notifies_ticket_watchers(
     assert len(watcher_notifications) == 1
     assert watcher_notifications[0]["event_type"] == "comment_created"
     assert watcher_notifications[0]["comment_id"] == str(comments.documents[0]["_id"])
+    assert ticket_activities.documents[-1]["action"] == "comment_created"
 
 
 def test_watcher_routes_are_exposed_in_openapi():

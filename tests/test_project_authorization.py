@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from app.api import comment, project, ticket
 from app.models.comment import Comment
 from app.models.project import ProjectStatusAssign
-from app.models.ticket import AssignAgent, TicketStatusMove
+from app.models.ticket import AssignAgent
 
 
 def add_membership(project_members, project_id, user_id, role):
@@ -274,37 +274,6 @@ def test_project_member_can_view_all_project_tickets(
     )
 
     assert [item["ticket_code"] for item in response["data"]] == ["ALL-1"]
-
-
-def test_reporter_cannot_change_ticket_status(
-    monkeypatch, fake_collection, project_members
-):
-    project_id = ObjectId()
-    ticket_id = ObjectId()
-    reporter_id = ObjectId()
-    status_id = ObjectId()
-    monkeypatch.setattr(
-        ticket,
-        "ticket_collection",
-        fake_collection.__class__([{"_id": ticket_id, "project_id": str(project_id)}]),
-    )
-    monkeypatch.setattr(
-        ticket,
-        "projects_collection",
-        fake_collection.__class__(
-            [{"_id": project_id, "assigned_statuses": [str(status_id)]}]
-        ),
-    )
-    add_membership(project_members, project_id, reporter_id, "reporter")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_status(
-            str(ticket_id),
-            TicketStatusMove(target_status_id=str(status_id)),
-            current_user={"_id": reporter_id, "role": "admin"},
-        )
-
-    assert exc_info.value.status_code == 403
 
 
 def test_reporter_only_sees_public_comments(

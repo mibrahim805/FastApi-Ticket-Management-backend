@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
+from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import parse_object_id, require_ticket_membership
 from app.db.db import (
@@ -83,6 +84,21 @@ async def upload_attachment(
     )
 
     result = attachment_collection.insert_one(attachment.model_dump())
+    log_activity(
+        ticket_id=ticket_id,
+        action="attachment_uploaded",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "attachment",
+                "old_value": None,
+                "new_value": {
+                    "attachment_id": str(result.inserted_id),
+                    "file_name": stored_name,
+                },
+            }
+        ],
+    )
 
     return {
         "message": "Attachment uploaded successfully",

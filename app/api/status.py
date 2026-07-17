@@ -120,6 +120,11 @@ def create_default_workflow_statuses(
 
 @router.get("/")
 def list_statuses(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only super_admin can list statuses",
+        )
     statuses = list(statuses_collection.find().sort("order", 1))
     for s in statuses:
         s["_id"] = str(s["_id"])

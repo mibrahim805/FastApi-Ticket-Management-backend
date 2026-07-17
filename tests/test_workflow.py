@@ -4,79 +4,96 @@ from fastapi import HTTPException
 
 from app.api import project, ticket
 from app.main import app
-from app.models.project import ProjectWorkflowUpdate, WorkflowTransition
-from app.models.ticket import (
-    BulkAssignRequest,
-    BulkTransitionRequest,
-    TicketTransitionRequest,
-)
+from app.models.ticket import BulkAssignRequest, BulkTransitionRequest
+from app.models.transition import ProjectWorkflowUpdate, TransitionCreate
 
 
-def _transition(name, source, target, roles=None, requires_assignee=False):
+def _transition(
+    project_id,
+    name,
+    sources,
+    target,
+    *,
+    roles=None,
+    requires_assignee=False,
+    transition_id=None,
+):
     return {
+        "_id": transition_id or ObjectId(),
+        "project_id": project_id,
         "name": name,
-        "from_status_id": str(source),
+        "from_status_ids": [str(status_id) for status_id in sources],
         "to_status_id": str(target),
-        "guards": {
+        "guard": {
             "allowed_roles": roles or ["lead", "member"],
             "requires_assignee": requires_assignee,
         },
     }
 
 
-def test_project_lead_can_configure_branching_and_backward_workflow(
+def test_project_lead_configures_collection_backed_transition_with_many_sources(
     monkeypatch,
     fake_collection,
+    transitions,
     grant_project_role,
 ):
     project_id = ObjectId()
     lead_id = ObjectId()
     open_id = ObjectId()
-    progress_id = ObjectId()
+    reopened_id = ObjectId()
     done_id = ObjectId()
     projects = fake_collection.__class__(
         [
             {
                 "_id": project_id,
-                "assigned_statuses": [str(open_id), str(progress_id), str(done_id)],
+                "assigned_statuses": [str(open_id), str(reopened_id), str(done_id)],
+                "workflow_transitions": [{"legacy": True}],
             }
         ]
     )
     statuses = fake_collection.__class__(
         [
             {"_id": open_id, "name": "Open"},
-            {"_id": progress_id, "name": "In Progress"},
+            {"_id": reopened_id, "name": "Reopened"},
             {"_id": done_id, "name": "Done"},
         ]
     )
     monkeypatch.setattr(project, "projects_collection", projects)
     monkeypatch.setattr(project, "statuses_collection", statuses)
+    monkeypatch.setattr(project, "transitions_collection", transitions)
     grant_project_role(project_id, lead_id, "lead")
-    payload = ProjectWorkflowUpdate(
-        transitions=[
-            WorkflowTransition(**_transition("Start", open_id, progress_id)),
-            WorkflowTransition(**_transition("Skip", open_id, done_id)),
-            WorkflowTransition(**_transition("Return", progress_id, open_id)),
-            WorkflowTransition(**_transition("Reopen", done_id, open_id)),
-        ]
-    )
 
     response = project.configure_project_workflow(
         str(project_id),
-        payload,
+        ProjectWorkflowUpdate(
+            transitions=[
+                TransitionCreate(
+                    name="Complete",
+                    from_status_ids=[str(open_id), str(reopened_id)],
+                    to_status_id=str(done_id),
+                    guard={
+                        "allowed_roles": ["lead", "member"],
+                        "requires_assignee": True,
+                    },
+                )
+            ]
+        ),
         current_user={"_id": lead_id, "role": "user"},
     )
 
-    assert [item["name"] for item in response["transitions"]] == [
-        "Start",
-        "Skip",
-        "Return",
-        "Reopen",
-    ]
-    assert projects.documents[0]["workflow_transitions"] == response["transitions"]
+    stored = transitions.documents[0]
+    assert stored["project_id"] == project_id
+    assert stored["from_status_ids"] == [str(open_id), str(reopened_id)]
+    assert stored["to_status_id"] == str(done_id)
+    assert stored["guard"] == {
+        "allowed_roles": ["lead", "member"],
+        "requires_assignee": True,
+    }
+    assert response["transitions"][0]["_id"] == str(stored["_id"])
+    assert "workflow_transitions" not in projects.documents[0]
 
 
-def test_transition_names_only_need_to_be_unique_per_source_status(
+def test_workflow_configuration_allows_duplicate_names_with_distinct_ids(
     monkeypatch,
     fake_collection,
     grant_project_role,
@@ -85,27 +102,41 @@ def test_transition_names_only_need_to_be_unique_per_source_status(
     lead_id = ObjectId()
     first_id = ObjectId()
     second_id = ObjectId()
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(first_id), str(second_id)],
-            }
-        ]
+    monkeypatch.setattr(
+        project,
+        "projects_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": project_id,
+                    "assigned_statuses": [str(first_id), str(second_id)],
+                }
+            ]
+        ),
     )
-    statuses = fake_collection.__class__(
-        [
-            {"_id": first_id, "name": "First"},
-            {"_id": second_id, "name": "Second"},
-        ]
+    monkeypatch.setattr(
+        project,
+        "statuses_collection",
+        fake_collection.__class__(
+            [
+                {"_id": first_id, "name": "First"},
+                {"_id": second_id, "name": "Second"},
+            ]
+        ),
     )
-    monkeypatch.setattr(project, "projects_collection", projects)
-    monkeypatch.setattr(project, "statuses_collection", statuses)
     grant_project_role(project_id, lead_id, "lead")
     payload = ProjectWorkflowUpdate(
         transitions=[
-            WorkflowTransition(**_transition("Move", first_id, second_id)),
-            WorkflowTransition(**_transition("Move", second_id, first_id)),
+            TransitionCreate(
+                name="Move",
+                from_status_ids=[str(first_id)],
+                to_status_id=str(second_id),
+            ),
+            TransitionCreate(
+                name="move",
+                from_status_ids=[str(second_id)],
+                to_status_id=str(first_id),
+            ),
         ]
     )
 
@@ -116,178 +147,85 @@ def test_transition_names_only_need_to_be_unique_per_source_status(
     )
 
     assert len(response["transitions"]) == 2
+    assert response["transitions"][0]["_id"] != response["transitions"][1]["_id"]
 
 
-def test_named_transition_enforces_role_and_assignee_guards(
+def test_transition_id_accepts_any_configured_source_and_logs_activity(
     monkeypatch,
     fake_collection,
+    transitions,
+    ticket_activities,
     grant_project_role,
 ):
     project_id = ObjectId()
     ticket_id = ObjectId()
     open_id = ObjectId()
-    progress_id = ObjectId()
-    member_id = ObjectId()
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(open_id), str(progress_id)],
-                "workflow_transitions": [
-                    _transition(
-                        "Start",
-                        open_id,
-                        progress_id,
-                        roles=["lead"],
-                        requires_assignee=True,
-                    )
-                ],
-            }
-        ]
-    )
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "current_status_id": str(open_id),
-                "current_status_name": "Open",
-                "assigned_agent": None,
-            }
-        ]
-    )
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_project_role(project_id, member_id, "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.transition_ticket(
-            str(ticket_id),
-            TicketTransitionRequest(transition_name="Start"),
-            current_user={"_id": member_id, "role": "agent"},
-        )
-
-    assert exc_info.value.status_code == 403
-
-    project_membership = ticket.project_members_collection.documents[0]
-    project_membership["role"] = "lead"
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.transition_ticket(
-            str(ticket_id),
-            TicketTransitionRequest(transition_name="Start"),
-            current_user={"_id": member_id, "role": "agent"},
-        )
-
-    assert exc_info.value.status_code == 400
-    assert "assigned" in exc_info.value.detail.lower()
-
-
-def test_named_transition_can_move_backward_and_clears_resolution_dates(
-    monkeypatch,
-    fake_collection,
-    grant_project_role,
-):
-    project_id = ObjectId()
-    ticket_id = ObjectId()
-    open_id = ObjectId()
+    reopened_id = ObjectId()
     done_id = ObjectId()
-    lead_id = ObjectId()
+    member_id = ObjectId()
+    transition = _transition(
+        project_id,
+        "Complete",
+        [open_id, reopened_id],
+        done_id,
+        roles=["member"],
+    )
+    transitions.insert_one(transition)
     projects = fake_collection.__class__(
         [
             {
                 "_id": project_id,
-                "assigned_statuses": [str(open_id), str(done_id)],
-                "workflow_transitions": [
-                    _transition("Reopen", done_id, open_id, roles=["lead"])
-                ],
+                "assigned_statuses": [str(open_id), str(reopened_id), str(done_id)],
             }
         ]
     )
-    statuses = fake_collection.__class__([{"_id": open_id, "name": "To Do"}])
+    statuses = fake_collection.__class__([{"_id": done_id, "name": "Done"}])
     tickets = fake_collection.__class__(
         [
             {
                 "_id": ticket_id,
                 "project_id": str(project_id),
                 "ticket_code": "FLOW-1",
-                "current_status_id": str(done_id),
-                "current_status_name": "Done",
-                "resolved_date": "old",
-                "closed_date": "old",
+                "current_status_id": str(reopened_id),
+                "current_status_name": "Reopened",
             }
         ]
     )
     monkeypatch.setattr(ticket, "projects_collection", projects)
     monkeypatch.setattr(ticket, "statuses_collection", statuses)
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    monkeypatch.setattr(ticket, "transitions_collection", transitions)
     monkeypatch.setattr(ticket, "notifications_collection", fake_collection.__class__())
-    grant_project_role(project_id, lead_id, "lead")
+    grant_project_role(project_id, member_id, "member")
 
-    response = ticket.reopen_ticket(
+    response = ticket.transition_ticket(
         str(ticket_id),
-        current_user={"_id": lead_id, "role": "agent"},
+        str(transition["_id"]),
+        current_user={"_id": member_id, "role": "agent"},
     )
 
-    assert response["transition"] == "Reopen"
-    assert response["current_status"] == "To Do"
-    assert tickets.documents[0]["resolved_date"] is None
-    assert tickets.documents[0]["closed_date"] is None
+    assert response["transition_id"] == str(transition["_id"])
+    assert response["current_status"] == "Done"
+    assert tickets.documents[0]["current_status_id"] == str(done_id)
+    assert ticket_activities.documents[-1]["action"] == "ticket_transitioned"
+    assert ticket_activities.documents[-1]["changes"] == [
+        {
+            "field": "current_status_id",
+            "old_value": str(reopened_id),
+            "new_value": str(done_id),
+        },
+        {
+            "field": "current_status_name",
+            "old_value": "Reopened",
+            "new_value": "Done",
+        },
+    ]
 
 
-def test_legacy_reopen_uses_project_default_status(
+def test_transition_rejects_current_status_outside_allowed_sources(
     monkeypatch,
     fake_collection,
-    grant_project_role,
-):
-    project_id = ObjectId()
-    ticket_id = ObjectId()
-    todo_id = ObjectId()
-    closed_id = ObjectId()
-    lead_id = ObjectId()
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(todo_id), str(closed_id)],
-                "default_status_id": str(todo_id),
-                "workflow_transitions": [],
-            }
-        ]
-    )
-    statuses = fake_collection.__class__([{"_id": todo_id, "name": "To Do"}])
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "ticket_code": "OLD-1",
-                "current_status_id": str(closed_id),
-                "current_status_name": "closed",
-                "resolved_date": "old",
-                "closed_date": "old",
-            }
-        ]
-    )
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "statuses_collection", statuses)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "notifications_collection", fake_collection.__class__())
-    grant_project_role(project_id, lead_id, "lead")
-
-    response = ticket.reopen_ticket(
-        str(ticket_id),
-        current_user={"_id": lead_id, "role": "agent"},
-    )
-
-    assert response["current_status"] == "To Do"
-    assert tickets.documents[0]["current_status_id"] == str(todo_id)
-    assert tickets.documents[0]["resolved_date"] is None
-    assert tickets.documents[0]["closed_date"] is None
-
-
-def test_move_forward_requires_named_transition_when_workflow_branches(
-    monkeypatch,
-    fake_collection,
+    transitions,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -296,44 +234,175 @@ def test_move_forward_requires_named_transition_when_workflow_branches(
     progress_id = ObjectId()
     done_id = ObjectId()
     member_id = ObjectId()
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(open_id), str(progress_id), str(done_id)],
-                "workflow_transitions": [
-                    _transition("Start", open_id, progress_id),
-                    _transition("Skip", open_id, done_id),
-                ],
-            }
-        ]
+    transition = _transition(project_id, "Complete", [progress_id], done_id)
+    transitions.insert_one(transition)
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": project_id,
+                    "assigned_statuses": [str(open_id), str(progress_id), str(done_id)],
+                }
+            ]
+        ),
     )
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "current_status_id": str(open_id),
-                "current_status_name": "Open",
-            }
-        ]
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": ticket_id,
+                    "project_id": str(project_id),
+                    "current_status_id": str(open_id),
+                }
+            ]
+        ),
     )
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
     grant_project_role(project_id, member_id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
+        ticket.transition_ticket(
             str(ticket_id),
+            str(transition["_id"]),
             current_user={"_id": member_id, "role": "agent"},
         )
 
-    assert exc_info.value.status_code == 409
+    assert exc_info.value.status_code == 400
+    assert "allowed transition source" in exc_info.value.detail
 
 
-def test_bulk_transition_reports_successes_and_failures(
+def test_transition_rejects_transition_from_another_project(
     monkeypatch,
     fake_collection,
+    transitions,
+    grant_project_role,
+):
+    project_id = ObjectId()
+    other_project_id = ObjectId()
+    ticket_id = ObjectId()
+    open_id = ObjectId()
+    done_id = ObjectId()
+    member_id = ObjectId()
+    transition = _transition(other_project_id, "Complete", [open_id], done_id)
+    transitions.insert_one(transition)
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": project_id,
+                    "assigned_statuses": [str(open_id), str(done_id)],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": ticket_id,
+                    "project_id": str(project_id),
+                    "current_status_id": str(open_id),
+                }
+            ]
+        ),
+    )
+    grant_project_role(project_id, member_id, "member")
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket.transition_ticket(
+            str(ticket_id),
+            str(transition["_id"]),
+            current_user={"_id": member_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "different project" in exc_info.value.detail
+
+
+def test_transition_enforces_role_and_assignee_guards(
+    monkeypatch,
+    fake_collection,
+    transitions,
+    project_members,
+):
+    project_id = ObjectId()
+    ticket_id = ObjectId()
+    open_id = ObjectId()
+    progress_id = ObjectId()
+    user_id = ObjectId()
+    transition = _transition(
+        project_id,
+        "Start",
+        [open_id],
+        progress_id,
+        roles=["lead"],
+        requires_assignee=True,
+    )
+    transitions.insert_one(transition)
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": project_id,
+                    "assigned_statuses": [str(open_id), str(progress_id)],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": ticket_id,
+                    "project_id": str(project_id),
+                    "current_status_id": str(open_id),
+                    "assigned_agent": None,
+                }
+            ]
+        ),
+    )
+    membership = {
+        "_id": ObjectId(),
+        "project_id": project_id,
+        "user_id": user_id,
+        "role": "member",
+    }
+    project_members.documents.append(membership)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket.transition_ticket(
+            str(ticket_id),
+            str(transition["_id"]),
+            current_user={"_id": user_id, "role": "agent"},
+        )
+    assert exc_info.value.status_code == 403
+
+    project_members.documents[0]["role"] = "lead"
+    with pytest.raises(HTTPException) as exc_info:
+        ticket.transition_ticket(
+            str(ticket_id),
+            str(transition["_id"]),
+            current_user={"_id": user_id, "role": "agent"},
+        )
+    assert exc_info.value.status_code == 400
+    assert "assigned" in exc_info.value.detail.lower()
+
+
+def test_bulk_transition_uses_one_transition_id_and_reports_failures(
+    monkeypatch,
+    fake_collection,
+    transitions,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -342,64 +411,67 @@ def test_bulk_transition_reports_successes_and_failures(
     open_id = ObjectId()
     done_id = ObjectId()
     member_id = ObjectId()
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(open_id), str(done_id)],
-                "workflow_transitions": [_transition("Complete", open_id, done_id)],
-            }
-        ]
+    transition = _transition(project_id, "Complete", [open_id], done_id)
+    transitions.insert_one(transition)
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": project_id,
+                    "assigned_statuses": [str(open_id), str(done_id)],
+                }
+            ]
+        ),
     )
-    statuses = fake_collection.__class__([{"_id": done_id, "name": "Done"}])
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": first_ticket_id,
-                "project_id": str(project_id),
-                "ticket_code": "BULK-1",
-                "current_status_id": str(open_id),
-                "current_status_name": "Open",
-            },
-            {
-                "_id": second_ticket_id,
-                "project_id": str(project_id),
-                "ticket_code": "BULK-2",
-                "current_status_id": str(done_id),
-                "current_status_name": "Done",
-            },
-        ]
+    monkeypatch.setattr(
+        ticket,
+        "statuses_collection",
+        fake_collection.__class__([{"_id": done_id, "name": "Done"}]),
     )
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "statuses_collection", statuses)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": first_ticket_id,
+                    "project_id": str(project_id),
+                    "current_status_id": str(open_id),
+                    "current_status_name": "Open",
+                },
+                {
+                    "_id": second_ticket_id,
+                    "project_id": str(project_id),
+                    "current_status_id": str(done_id),
+                    "current_status_name": "Done",
+                },
+            ]
+        ),
+    )
     monkeypatch.setattr(ticket, "notifications_collection", fake_collection.__class__())
     grant_project_role(project_id, member_id, "member")
 
     response = ticket.bulk_transition_tickets(
         BulkTransitionRequest(
             ticket_ids=[str(first_ticket_id), str(second_ticket_id)],
-            transition_name="Complete",
+            transition_id=str(transition["_id"]),
         ),
         current_user={"_id": member_id, "role": "agent"},
     )
 
-    assert response["total"] == 2
     assert [item["ticket_id"] for item in response["succeeded"]] == [
         str(first_ticket_id)
     ]
-    assert response["failed"] == [
-        {
-            "ticket_id": str(second_ticket_id),
-            "status_code": 400,
-            "detail": "Transition is not available",
-        }
-    ]
+    assert response["failed"][0]["ticket_id"] == str(second_ticket_id)
+    assert response["failed"][0]["status_code"] == 400
 
 
-def test_bulk_assign_reports_successes_and_failures(
+def test_assignment_and_bulk_assignment_write_activity(
     monkeypatch,
     fake_collection,
+    ticket_activities,
     grant_project_role,
 ):
     project_id = ObjectId()
@@ -416,9 +488,12 @@ def test_bulk_assign_reports_successes_and_failures(
             }
         ]
     )
-    users = fake_collection.__class__([{"_id": assignee_id}])
     monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "user_collection", users)
+    monkeypatch.setattr(
+        ticket,
+        "user_collection",
+        fake_collection.__class__([{"_id": assignee_id}]),
+    )
     monkeypatch.setattr(ticket, "notifications_collection", fake_collection.__class__())
     grant_project_role(project_id, lead_id, "lead")
     grant_project_role(project_id, assignee_id, "member")
@@ -432,20 +507,20 @@ def test_bulk_assign_reports_successes_and_failures(
     )
 
     assert response["succeeded"] == [{"ticket_id": str(ticket_id)}]
-    assert response["failed"] == [
-        {
-            "ticket_id": str(missing_ticket_id),
-            "status_code": 404,
-            "detail": "Ticket not found",
-        }
-    ]
-    assert tickets.documents[0]["assigned_agent"] == str(assignee_id)
+    assert ticket_activities.documents[-1]["action"] == "ticket_assigned"
+    assert ticket_activities.documents[-1]["changes"][0] == {
+        "field": "assigned_agent",
+        "old_value": None,
+        "new_value": str(assignee_id),
+    }
 
 
-def test_workflow_and_bulk_routes_are_exposed_in_openapi():
+def test_only_transition_id_endpoint_can_change_workflow_status_in_openapi():
     paths = app.openapi()["paths"]
 
-    assert "/projects/{project_id}/workflow" in paths
-    assert "/tickets/{ticket_id}/transitions" in paths
+    assert "post" in paths["/{ticket_id}/transitions/{transition_id}"]
+    assert set(paths["/tickets/{ticket_id}/transitions"]) == {"get"}
+    assert "/{ticket_id}/move-forward" not in paths
+    assert "/tickets/{ticket_id}/status" not in paths
+    assert "/tickets/{ticket_id}/reopen" not in paths
     assert "/tickets/bulk/transition" in paths
-    assert "/tickets/bulk/assign" in paths
