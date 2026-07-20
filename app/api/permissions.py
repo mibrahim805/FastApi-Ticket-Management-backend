@@ -104,3 +104,49 @@ def require_ticket_membership(
         allowed_roles=allowed_roles,
         role_detail=role_detail,
     )
+
+
+def require_ticket_participant(
+    ticket: dict,
+    current_user: dict,
+    project_members_collection,
+) -> dict:
+    """Require project membership, with support for legacy ticket participants.
+
+    New assignments are restricted to project members. The participant fallbacks
+    keep older tickets usable when their creator or assignee predates project
+    memberships, and retain the original super-admin override.
+    """
+    try:
+        return require_ticket_membership(
+            ticket,
+            current_user,
+            project_members_collection,
+        )
+    except HTTPException as error:
+        is_missing_membership = (
+            error.status_code == 403
+            and error.detail == "You are not a member of this project"
+        )
+        if not is_missing_membership:
+            raise
+
+    user_id = current_user.get("_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authenticated user is missing an ID",
+        )
+
+    user_id = str(user_id)
+    if user_id == str(ticket.get("assigned_agent")):
+        return {"role": ProjectRole.MEMBER.value, "source": "ticket_assignment"}
+    if user_id == str(ticket.get("userId")):
+        return {"role": ProjectRole.REPORTER.value, "source": "ticket_creator"}
+    if current_user.get("role") == "super_admin":
+        return {"role": "super_admin", "source": "global_role"}
+
+    raise HTTPException(
+        status_code=403,
+        detail="You do not have permission to access this ticket",
+    )

@@ -129,8 +129,13 @@ Users can:
 
 - Add Comment
 - View Comments
+- Reply in threads
+- Edit or delete their own comments
+- Mention project participants with `@username`
 
-Comments are stored separately from tickets.
+Comments are stored separately from tickets. Reporter-visible comments remain
+public-only; internal comments and their mention notifications are restricted to
+participants who can view them.
 
 ---
 
@@ -300,8 +305,14 @@ Authorization: Bearer <your_token>
 
 | Method | Endpoint |
 |---------|----------|
-| POST | /comments |
-| GET | /comments/{ticket_id} |
+| POST | /tickets/{ticket_id}/comments |
+| GET | /tickets/{ticket_id}/comments |
+| POST | /comments/{comment_id}/replies |
+| PATCH | /comments/{comment_id} |
+| DELETE | /comments/{comment_id} |
+
+Pass `threaded=true` to the ticket comment listing endpoint to nest replies under
+their parent comments.
 
 ---
 
