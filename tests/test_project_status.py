@@ -8,7 +8,10 @@ from app.models.status import StatusCreate, StatusUpdate
 
 
 def test_assign_statuses_to_project_orders_statuses(
-    monkeypatch, fake_collection, grant_project_role
+    monkeypatch,
+    fake_collection,
+    transitions,
+    grant_project_role,
 ):
     project_id = ObjectId()
     lead_id = ObjectId()
@@ -25,6 +28,13 @@ def test_assign_statuses_to_project_orders_statuses(
 
     monkeypatch.setattr(project, "projects_collection", projects)
     monkeypatch.setattr(project, "statuses_collection", statuses)
+    transitions.insert_one(
+        {
+            "_id": ObjectId(),
+            "project_id": project_id,
+            "name": "Old workflow",
+        }
+    )
     grant_project_role(project_id, lead_id)
 
     response = project.assign_statuses_to_project(
@@ -36,6 +46,7 @@ def test_assign_statuses_to_project_orders_statuses(
     assert response["assigned_statuses"][0]["name"] == "Open"
     assert projects.documents[0]["assigned_statuses"] == [str(first_id), str(second_id)]
     assert projects.documents[0]["default_status_id"] == str(first_id)
+    assert transitions.documents == []
 
 
 def test_assign_statuses_to_project_rejects_non_admin(
@@ -102,6 +113,17 @@ def test_create_status_rejects_non_admin(monkeypatch, fake_collection):
     with pytest.raises(HTTPException) as exc_info:
         status.create_status(
             StatusCreate(name="Open", order=1),
+            current_user={"_id": ObjectId(), "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+def test_list_statuses_rejects_non_super_admin(monkeypatch, fake_collection):
+    monkeypatch.setattr(status, "statuses_collection", fake_collection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        status.list_statuses(
             current_user={"_id": ObjectId(), "role": "agent"},
         )
 

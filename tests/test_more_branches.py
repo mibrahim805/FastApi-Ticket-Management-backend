@@ -148,21 +148,19 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
     projects = fake_collection.__class__()
-    statuses = fake_collection.__class__()
     users = fake_collection.__class__()
 
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "comments_collection", comments)
     monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
     monkeypatch.setattr(ticket_mod, "projects_collection", projects)
-    monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
     monkeypatch.setattr(ticket_mod, "user_collection", users)
 
     # update missing
     with pytest.raises(HTTPException):
         ticket_mod.update_ticket(
             str(ObjectId()),
-            TicketUpdate(status="s", priority="p", category="c", assigned_to="a"),
+            TicketUpdate(priority="p", category="c"),
             current_user={"_id": ObjectId(), "role": "agent"},
         )
 
@@ -171,7 +169,7 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     with pytest.raises(HTTPException):
         ticket_mod.update_ticket(
             str(tid),
-            TicketUpdate(status="s", priority="p", category="c", assigned_to="a"),
+            TicketUpdate(priority="p", category="c"),
             current_user={"_id": ObjectId(), "role": "agent"},
         )
 
@@ -224,23 +222,6 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
             str(td), current_user={"_id": ObjectId(), "role": "agent"}
         )
 
-    # move_ticket_forward: project has no statuses
-    t1 = tickets.insert_one(
-        {
-            "_id": ObjectId(),
-            "project_id": str(ObjectId()),
-            "userId": str(uid),
-            "ticket_code": "T1",
-            "current_status_id": str(ObjectId()),
-            "current_status_name": "S",
-        }
-    ).inserted_id
-    projects.insert_one({"_id": ObjectId()})
-    with pytest.raises(HTTPException):
-        ticket_mod.move_ticket_forward(
-            str(t1), current_user={"_id": uid, "role": "super_admin"}
-        )
-
     # additional branches: get_tickets category and assigned_agent
     tickets.insert_one(
         {
@@ -269,26 +250,6 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
         current_user={"_id": uid, "role": "super_admin"},
     )
     assert "data" in res_f
-
-    # move_ticket_forward project has empty statuses -> 400
-    b_empty = projects.insert_one(
-        {"_id": ObjectId(), "assigned_statuses": []}
-    ).inserted_id
-    grant_project_role(b_empty, uid, "member")
-    tt_empty = tickets.insert_one(
-        {
-            "_id": ObjectId(),
-            "project_id": str(b_empty),
-            "userId": str(uid),
-            "ticket_code": "T_EMPTY",
-            "current_status_id": str(ObjectId()),
-            "current_status_name": "S",
-        }
-    ).inserted_id
-    with pytest.raises(HTTPException):
-        ticket_mod.move_ticket_forward(
-            str(tt_empty), current_user={"_id": uid, "role": "super_admin"}
-        )
 
 
 # registration extra branches
@@ -330,21 +291,19 @@ def test_activate_or_deactivate_activates(monkeypatch, fake_collection):
     assert resp == {"message": "User activated successfully"}
 
 
-def test_ticket_comments_conversion_and_move_last_closes(
+def test_ticket_comments_conversion_and_filters(
     monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
     comments = fake_collection.__class__()
     notifications = fake_collection.__class__()
     projects = fake_collection.__class__()
-    statuses = fake_collection.__class__()
     users = fake_collection.__class__()
 
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "comments_collection", comments)
     monkeypatch.setattr(ticket_mod, "notifications_collection", notifications)
     monkeypatch.setattr(ticket_mod, "projects_collection", projects)
-    monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
     monkeypatch.setattr(ticket_mod, "user_collection", users)
 
     # comments conversion
@@ -397,37 +356,6 @@ def test_ticket_comments_conversion_and_move_last_closes(
         current_user={"_id": uid, "role": "agent"},
     )
     assert "data" in res
-
-    # move to last status sets closed_date
-    s1 = ObjectId()
-    s2 = ObjectId()
-    s3 = ObjectId()
-    b = projects.insert_one(
-        {
-            "_id": ObjectId(),
-            "assigned_statuses": [str(s1), str(s2), str(s3)],
-            "code": "BB",
-        }
-    ).inserted_id
-    grant_project_role(b, uid, "member")
-    statuses.insert_one({"_id": s3, "name": "Last"})
-    tt = tickets.insert_one(
-        {
-            "_id": ObjectId(),
-            "project_id": str(b),
-            "userId": str(uid),
-            "ticket_code": "TX",
-            "current_status_id": str(s2),
-            "current_status_name": "Middle",
-        }
-    ).inserted_id
-    resp2 = ticket_mod.move_ticket_forward(
-        str(tt), current_user={"_id": uid, "role": "super_admin"}
-    )
-    assert resp2["current_status"] == "Last"
-    # ensure closed_date updated in stored ticket
-    updated = tickets.find_one({"_id": tt})
-    assert "closed_date" in updated
 
 
 def test_auth_get_current_user_no_sub_and_success(monkeypatch, fake_collection):
@@ -513,15 +441,13 @@ def test_assign_statuses_project_not_found_and_status_not_found(
         )
 
 
-def test_ticket_lower_filters_and_move_forbidden(
+def test_ticket_lower_filters_and_project_status_validation(
     monkeypatch, fake_collection, grant_project_role
 ):
     tickets = fake_collection.__class__()
     projects = fake_collection.__class__()
-    statuses = fake_collection.__class__()
     monkeypatch.setattr(ticket_mod, "ticket_collection", tickets)
     monkeypatch.setattr(ticket_mod, "projects_collection", projects)
-    monkeypatch.setattr(ticket_mod, "statuses_collection", statuses)
 
     project_key = "ZC"
     project_id = projects.insert_one(
@@ -561,21 +487,3 @@ def test_ticket_lower_filters_and_move_forbidden(
         current_user={"_id": uid, "role": "super_admin"},
     )
     assert "data" in res
-
-    # move_ticket_forward forbidden for agent who is not owner
-    move_project_id = ObjectId()
-    t = tickets.insert_one(
-        {
-            "_id": ObjectId(),
-            "project_id": str(move_project_id),
-            "userId": str(ObjectId()),
-            "ticket_code": "TF",
-            "current_status_id": str(ObjectId()),
-            "current_status_name": "S",
-        }
-    ).inserted_id
-    grant_project_role(move_project_id, uid, "reporter")
-    with pytest.raises(HTTPException):
-        ticket_mod.move_ticket_forward(
-            str(t), current_user={"_id": uid, "role": "agent"}
-        )

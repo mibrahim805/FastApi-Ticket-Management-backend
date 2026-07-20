@@ -38,17 +38,36 @@ def test_project_update_key_rejects_invalid_values(code):
 
 
 def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch):
-    calls = []
+    project_calls = []
+    issue_link_calls = []
+    transition_calls = []
 
     class RecordingCollection:
-        def create_index(self, keys, **options):
-            calls.append((keys, options))
+        def __init__(self, calls):
+            self.calls = calls
 
-    monkeypatch.setattr(database, "projects_collection", RecordingCollection())
+        def create_index(self, keys, **options):
+            self.calls.append((keys, options))
+
+    monkeypatch.setattr(
+        database,
+        "projects_collection",
+        RecordingCollection(project_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "issue_links_collection",
+        RecordingCollection(issue_link_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "transitions_collection",
+        RecordingCollection(transition_calls),
+    )
 
     database.ensure_database_indexes()
 
-    assert calls == [
+    assert project_calls == [
         (
             [("code", 1)],
             {
@@ -57,6 +76,37 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
                 "collation": {"locale": "en", "strength": 2},
             },
         )
+    ]
+    assert issue_link_calls == [
+        (
+            [
+                ("from_ticket_id", 1),
+                ("to_ticket_id", 1),
+                ("link_type", 1),
+            ],
+            {
+                "name": "issue_links_from_to_type_unique",
+                "unique": True,
+            },
+        ),
+        (
+            [("from_ticket_id", 1)],
+            {"name": "issue_links_from_ticket"},
+        ),
+        (
+            [("to_ticket_id", 1)],
+            {"name": "issue_links_to_ticket"},
+        ),
+    ]
+    assert transition_calls == [
+        (
+            [("project_id", 1), ("name", 1)],
+            {"name": "transitions_project_name"},
+        ),
+        (
+            [("project_id", 1), ("from_status_ids", 1)],
+            {"name": "transitions_project_source"},
+        ),
     ]
 
 
@@ -67,6 +117,11 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
         "ensure_database_indexes",
         lambda: calls.append("created"),
     )
+    monkeypatch.setattr(
+        app_main,
+        "migrate_legacy_workflow_transitions",
+        lambda: calls.append("migrated"),
+    )
 
     async def run_lifespan():
         async with app_main.lifespan(app_main.app):
@@ -74,7 +129,46 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
 
     asyncio.run(run_lifespan())
 
-    assert calls == ["created"]
+    assert calls == ["created", "migrated"]
+
+
+def test_legacy_embedded_workflow_is_migrated(
+    monkeypatch,
+    fake_collection,
+):
+    project_id = ObjectId()
+    source_id = ObjectId()
+    target_id = ObjectId()
+    projects = fake_collection.__class__(
+        [
+            {
+                "_id": project_id,
+                "created_by": str(ObjectId()),
+                "workflow_transitions": [
+                    {
+                        "name": "Complete",
+                        "from_status_id": str(source_id),
+                        "to_status_id": str(target_id),
+                        "guards": {
+                            "allowed_roles": ["member"],
+                            "requires_assignee": True,
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    transitions = fake_collection.__class__()
+    monkeypatch.setattr(database, "projects_collection", projects)
+    monkeypatch.setattr(database, "transitions_collection", transitions)
+
+    migrated = database.migrate_legacy_workflow_transitions()
+
+    assert migrated == 1
+    assert transitions.documents[0]["project_id"] == project_id
+    assert transitions.documents[0]["from_status_ids"] == [str(source_id)]
+    assert transitions.documents[0]["guard"]["requires_assignee"] is True
+    assert "workflow_transitions" not in projects.documents[0]
 
 
 def test_create_project_rejects_duplicate_key(
@@ -279,6 +373,7 @@ def test_project_response_hides_retired_fields(
                 "code": "LEG",
                 "assigned_agent": str(ObjectId()),
                 "ticket_counter": 99,
+                "workflow_transitions": [{"legacy": True}],
             }
         ]
     )
@@ -292,6 +387,7 @@ def test_project_response_hides_retired_fields(
 
     assert "assigned_agent" not in response["project"]
     assert "ticket_counter" not in response["project"]
+    assert "workflow_transitions" not in response["project"]
 
 
 def test_public_schema_exposes_project_routes():

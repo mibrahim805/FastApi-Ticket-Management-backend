@@ -12,13 +12,14 @@ from app.api import (
     status,
     ticket,
 )
-from app.db.db import ensure_database_indexes
+from app.db.db import ensure_database_indexes, migrate_legacy_workflow_transitions
 from uploads import ticket_attachment
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_database_indexes()
+    migrate_legacy_workflow_transitions()
     yield
 
 

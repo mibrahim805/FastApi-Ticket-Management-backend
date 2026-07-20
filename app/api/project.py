@@ -16,6 +16,7 @@ from app.db.db import (
     projects_collection,
     statuses_collection,
     ticket_collection,
+    transitions_collection,
     user_collection,
 )
 from app.decorator.super_admin import super_admin_required
@@ -26,6 +27,7 @@ from app.models.project import (
     ProjectUpdate,
 )
 from app.models.project_member import ProjectMemberCreate
+from app.models.transition import ProjectWorkflowUpdate
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -58,6 +60,14 @@ def _serialize_project(project: dict) -> dict:
     # must not leak back into the public project representation.
     serialized.pop("assigned_agent", None)
     serialized.pop("ticket_counter", None)
+    serialized.pop("workflow_transitions", None)
+    return serialized
+
+
+def _serialize_transition(transition: dict) -> dict:
+    serialized = dict(transition)
+    serialized["_id"] = str(serialized["_id"])
+    serialized["project_id"] = str(serialized["project_id"])
     return serialized
 
 
@@ -151,6 +161,106 @@ def get_project(project_id: str, current_user: dict = Depends(get_current_user))
     return {"project": _serialize_project(project)}
 
 
+@router.get("/{project_id}/workflow")
+def get_project_workflow(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+    )
+    return {
+        "project_id": project_id,
+        "transitions": [
+            _serialize_transition(transition)
+            for transition in transitions_collection.find(
+                {"project_id": project_object_id}
+            ).sort("order", 1)
+        ],
+    }
+
+
+@router.put("/{project_id}/workflow")
+def configure_project_workflow(
+    project_id: str,
+    payload: ProjectWorkflowUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+
+    assigned_statuses = {
+        str(status_id) for status_id in project.get("assigned_statuses", [])
+    }
+
+    transitions = []
+    now = datetime.now(timezone.utc)
+    for order, transition in enumerate(payload.transitions):
+        from_status_ids = [
+            str(parse_object_id(status_id, "status_id"))
+            for status_id in transition.from_status_ids
+        ]
+        if len(from_status_ids) != len(set(from_status_ids)):
+            raise HTTPException(
+                status_code=400,
+                detail="Transition source status IDs must be unique",
+            )
+        to_status_id = str(parse_object_id(transition.to_status_id, "status_id"))
+        for from_status_id in from_status_ids:
+            if from_status_id not in assigned_statuses:
+                raise HTTPException(
+                    status_code=400,
+                    detail=("Transition source status is not assigned to this project"),
+                )
+        if to_status_id not in assigned_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail="Transition target status is not assigned to this project",
+            )
+        for status_id in {*from_status_ids, to_status_id}:
+            status_object_id = parse_object_id(status_id, "status_id")
+            if not statuses_collection.find_one({"_id": status_object_id}):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Workflow status '{status_id}' not found",
+                )
+
+        transition_document = transition.model_dump(mode="json")
+        transition_document["project_id"] = project_object_id
+        transition_document["from_status_ids"] = from_status_ids
+        transition_document["to_status_id"] = to_status_id
+        transition_document["guard"]["allowed_roles"] = list(
+            dict.fromkeys(transition_document["guard"]["allowed_roles"])
+        )
+        transition_document["order"] = order
+        transition_document["created_at"] = now
+        transition_document["created_by"] = str(current_user["_id"])
+        transitions.append(transition_document)
+
+    transitions_collection.delete_many({"project_id": project_object_id})
+    stored_transitions = []
+    for transition in transitions:
+        result = transitions_collection.insert_one(transition)
+        transition["_id"] = result.inserted_id
+        stored_transitions.append(_serialize_transition(transition))
+
+    projects_collection.update_one(
+        {"_id": project_object_id},
+        {
+            "$set": {
+                "updated_at": now,
+                "updated_by": str(current_user["_id"]),
+            },
+            "$unset": {"workflow_transitions": ""},
+        },
+    )
+    return {"project_id": project_id, "transitions": stored_transitions}
+
+
 @router.put("/{project_id}")
 def update_project(
     data: ProjectUpdate,
@@ -188,6 +298,7 @@ def delete_project(
     project_object_id, _ = _get_project_or_404(project_id)
     projects_collection.delete_one({"_id": project_object_id})
     project_members_collection.delete_many({"project_id": project_object_id})
+    transitions_collection.delete_many({"project_id": project_object_id})
     return {"message": "Project deleted"}
 
 
@@ -236,8 +347,10 @@ def assign_statuses_to_project(
                 "updated_at": datetime.now(timezone.utc),
                 "updated_by": str(current_user["_id"]),
             },
+            "$unset": {"workflow_transitions": ""},
         },
     )
+    transitions_collection.delete_many({"project_id": project_object_id})
 
     return {
         "message": "Statuses assigned to project successfully",

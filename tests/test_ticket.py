@@ -6,12 +6,13 @@ from fastapi import HTTPException
 
 from app.api import ticket
 from app.api.ticket import calculate_due_date
+from app.main import app
 from app.models.ticket import (
     AssignAgent,
     Category,
+    IssueType,
     Priority,
     TicketCreate,
-    TicketStatusMove,
 )
 
 
@@ -43,8 +44,16 @@ def test_calculate_due_date_invalid_priority():
         calculate_due_date("invalid")
 
 
+@pytest.mark.parametrize(
+    "issue_type, expected_issue_type",
+    [(None, "task"), (IssueType.BUG, "bug")],
+)
 def test_create_ticket_assigns_first_status_and_updates_counter(
-    monkeypatch, fake_collection, grant_project_role
+    monkeypatch,
+    fake_collection,
+    grant_project_role,
+    issue_type,
+    expected_issue_type,
 ):
     project_id = ObjectId()
     status_id = ObjectId()
@@ -75,21 +84,211 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
     monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
     grant_project_role(project_id, current_user["_id"], "member")
 
-    payload = TicketCreate(
-        project_id=str(project_id),
-        title="Printer issue",
-        description="Printer is offline",
-        category=Category.SUPPORT,
-        priority=Priority.HIGH,
-    )
+    payload_data = {
+        "project_id": str(project_id),
+        "title": "Printer issue",
+        "description": "Printer is offline",
+        "category": Category.SUPPORT,
+        "priority": Priority.HIGH,
+    }
+    if issue_type is not None:
+        payload_data["issue_type"] = issue_type
+    payload = TicketCreate(**payload_data)
 
     response = ticket.create_ticket(payload, current_user=current_user)
 
     assert response["ticket_code"].startswith("SUP-")
     assert response["current_status_id"] == str(status_id)
+    assert response["issue_type"] == expected_issue_type
+    assert response["labels"] == []
     assert response["due_date"] == "due-date"
+    assert tickets.documents[0]["issue_type"] == expected_issue_type
+    assert tickets.documents[0]["labels"] == []
     assert len(tickets.documents) == 1
     assert len(notifications.documents) == 1
+
+
+def test_create_ticket_persists_epic_reference(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_id = ObjectId()
+    status_id = ObjectId()
+    epic_id = ObjectId()
+    current_user_id = ObjectId()
+    projects = fake_collection.__class__(
+        [
+            {
+                "_id": project_id,
+                "code": "SUP",
+                "assigned_statuses": [str(status_id)],
+            }
+        ]
+    )
+    statuses = fake_collection.__class__([{"_id": status_id, "name": "Open"}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": epic_id,
+                "project_id": str(project_id),
+                "ticket_code": "SUP-1",
+                "issue_type": "epic",
+            }
+        ]
+    )
+    notifications = fake_collection.__class__()
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    monkeypatch.setattr(ticket, "statuses_collection", statuses)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    monkeypatch.setattr(ticket, "notifications_collection", notifications)
+    monkeypatch.setattr(ticket, "counters_collection", fake_collection.__class__())
+    monkeypatch.setattr(ticket, "log_activity", lambda **kwargs: None)
+    monkeypatch.setattr(ticket, "calculate_due_date", lambda priority: "due-date")
+    grant_project_role(project_id, current_user_id, "member")
+
+    response = ticket.create_ticket(
+        TicketCreate(
+            project_id=str(project_id),
+            title="Printer improvements",
+            description="Improve printer reliability",
+            category=Category.FEATURE_REQUEST,
+            issue_type=IssueType.STORY,
+            epic_id=str(epic_id),
+            labels=["backend", "customer-request"],
+            priority=Priority.MEDIUM,
+        ),
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    assert response["epic_id"] == str(epic_id)
+    assert response["labels"] == ["backend", "customer-request"]
+    assert tickets.documents[-1]["epic_id"] == str(epic_id)
+    assert tickets.documents[-1]["labels"] == ["backend", "customer-request"]
+
+
+def test_create_ticket_rejects_non_epic_reference(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_id = ObjectId()
+    referenced_issue_id = ObjectId()
+    current_user_id = ObjectId()
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__([{"_id": project_id, "code": "SUP"}]),
+    )
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": referenced_issue_id,
+                    "project_id": str(project_id),
+                    "issue_type": "task",
+                }
+            ]
+        ),
+    )
+    grant_project_role(project_id, current_user_id, "member")
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket.create_ticket(
+            TicketCreate(
+                project_id=str(project_id),
+                title="Child issue",
+                description="Invalid epic reference",
+                category=Category.SUPPORT,
+                issue_type=IssueType.SUBTASK,
+                epic_id=str(referenced_issue_id),
+                priority=Priority.LOW,
+            ),
+            current_user={"_id": current_user_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Referenced issue is not an epic"
+
+
+def test_get_epic_returns_child_issues_and_progress(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_id = ObjectId()
+    epic_id = ObjectId()
+    other_epic_id = ObjectId()
+    todo_status_id = ObjectId()
+    done_status_id = ObjectId()
+    current_user_id = ObjectId()
+    projects = fake_collection.__class__(
+        [
+            {
+                "_id": project_id,
+                "code": "SUP",
+                "assigned_statuses": [str(todo_status_id), str(done_status_id)],
+            }
+        ]
+    )
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": epic_id,
+                "project_id": str(project_id),
+                "ticket_code": "SUP-1",
+                "issue_type": "epic",
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUP-2",
+                "issue_type": "story",
+                "epic_id": str(epic_id),
+                "current_status_id": str(done_status_id),
+                "current_status_name": "Deployed",
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUP-3",
+                "issue_type": "bug",
+                "epic_id": str(epic_id),
+                "current_status_id": str(todo_status_id),
+                "current_status_name": "Open",
+                "resolved_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUP-4",
+                "issue_type": "task",
+                "epic_id": str(epic_id),
+                "current_status_id": str(todo_status_id),
+                "current_status_name": "Open",
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUP-5",
+                "issue_type": "story",
+                "epic_id": str(other_epic_id),
+                "current_status_id": str(done_status_id),
+            },
+        ]
+    )
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    grant_project_role(project_id, current_user_id, "reporter")
+
+    response = ticket.get_epic(
+        str(epic_id),
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    assert response["epic"]["ticket_code"] == "SUP-1"
+    assert {issue["ticket_code"] for issue in response["issues"]} == {
+        "SUP-2",
+        "SUP-3",
+        "SUP-4",
+    }
+    assert response["progress"] == {"done": 2, "total": 3}
 
 
 def test_create_ticket_rejects_missing_project(monkeypatch, fake_collection):
@@ -310,7 +509,160 @@ def test_get_tickets_includes_tickets_assigned_to_current_user(
 
     returned_codes = {item["ticket_code"] for item in response["data"]}
     assert returned_codes == {"TKT-1", "TKT-2", "TKT-3"}
+    assert {item["issue_type"] for item in response["data"]} == {"task"}
+    assert {tuple(item["labels"]) for item in response["data"]} == {()}
     assert response["pagination"]["total"] == 3
+
+
+@pytest.mark.parametrize(
+    "issue_type, expected_ticket_code",
+    [
+        (IssueType.BUG, "SUPPORT-1"),
+        (IssueType.TASK, "SUPPORT-3"),
+    ],
+)
+def test_get_tickets_filters_by_issue_type(
+    monkeypatch,
+    fake_collection,
+    grant_project_role,
+    issue_type,
+    expected_ticket_code,
+):
+    project_key = "SUPPORT"
+    project_id = ObjectId()
+    current_user_id = ObjectId()
+    projects = fake_collection.__class__([{"_id": project_id, "code": project_key}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-1",
+                "issue_type": "bug",
+                "title": "Broken printer",
+                "created_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-2",
+                "issue_type": "story",
+                "title": "Printer improvements",
+                "created_date": datetime(2026, 7, 2, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-3",
+                "title": "Legacy ticket without an issue type",
+                "created_date": datetime(2026, 7, 3, tzinfo=timezone.utc),
+            },
+        ]
+    )
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    grant_project_role(project_id, current_user_id, "member")
+
+    response = ticket.get_tickets(
+        project_key,
+        page=1,
+        page_size=10,
+        status=None,
+        priority=None,
+        category=None,
+        issue_type=issue_type,
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+        sort_by="created_at",
+        sort_order="desc",
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    assert [item["ticket_code"] for item in response["data"]] == [expected_ticket_code]
+    assert response["data"][0]["issue_type"] == issue_type.value
+    assert response["pagination"]["total"] == 1
+    assert response["filters_applied"]["issue_type"] == issue_type.value
+
+
+def test_get_tickets_filters_by_all_labels(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_key = "SUPPORT"
+    project_id = ObjectId()
+    current_user_id = ObjectId()
+    projects = fake_collection.__class__([{"_id": project_id, "code": project_key}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-1",
+                "labels": ["backend", "urgent"],
+                "created_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-2",
+                "labels": ["backend"],
+                "created_date": datetime(2026, 7, 2, tzinfo=timezone.utc),
+            },
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "ticket_code": "SUPPORT-3",
+                "labels": ["urgent", "customer"],
+                "created_date": datetime(2026, 7, 3, tzinfo=timezone.utc),
+            },
+        ]
+    )
+    monkeypatch.setattr(ticket, "projects_collection", projects)
+    monkeypatch.setattr(ticket, "ticket_collection", tickets)
+    grant_project_role(project_id, current_user_id, "member")
+
+    response = ticket.get_tickets(
+        project_key,
+        page=1,
+        page_size=10,
+        status=None,
+        priority=None,
+        category=None,
+        issue_type=None,
+        labels=["backend", "urgent"],
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+        sort_by="created_at",
+        sort_order="desc",
+        current_user={"_id": current_user_id, "role": "agent"},
+    )
+
+    assert [item["ticket_code"] for item in response["data"]] == ["SUPPORT-1"]
+    assert response["pagination"]["total"] == 1
+    assert response["filters_applied"]["labels"] == ["backend", "urgent"]
+
+
+def test_ticket_list_exposes_issue_type_filter_in_openapi():
+    openapi = app.openapi()
+    parameters = openapi["paths"]["/tickets/{project_key}"]["get"]["parameters"]
+    issue_type_parameter = next(
+        parameter for parameter in parameters if parameter["name"] == "issue_type"
+    )
+    labels_parameter = next(
+        parameter for parameter in parameters if parameter["name"] == "labels"
+    )
+
+    assert issue_type_parameter["in"] == "query"
+    assert labels_parameter["in"] == "query"
+    assert "/epics/{epic_id}" in openapi["paths"]
+    assert openapi["components"]["schemas"]["IssueType"]["enum"] == [
+        "bug",
+        "task",
+        "story",
+        "epic",
+        "subtask",
+    ]
 
 
 def test_get_tickets_handles_naive_due_date(
@@ -358,363 +710,6 @@ def test_get_tickets_handles_naive_due_date(
     )
 
     assert response["data"][0]["is_overdue"] is True
-
-
-def test_move_ticket_forward_advances_status(
-    monkeypatch, fake_collection, grant_project_role
-):
-    project_id = ObjectId()
-    open_id = ObjectId()
-    progress_id = ObjectId()
-    closed_id = ObjectId()
-    ticket_id = ObjectId()
-    current_user = {"_id": ObjectId(), "role": "agent"}
-
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(open_id), str(progress_id), str(closed_id)],
-            }
-        ]
-    )
-    statuses = fake_collection.__class__(
-        [
-            {"_id": progress_id, "name": "In Progress"},
-        ]
-    )
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(current_user["_id"]),
-                "ticket_code": "SUP-3",
-                "current_status_id": str(open_id),
-                "current_status_name": "Open",
-            }
-        ]
-    )
-
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "statuses_collection", statuses)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_project_role(project_id, current_user["_id"], "member")
-
-    response = ticket.move_ticket_forward(str(ticket_id), current_user=current_user)
-
-    assert response["previous_status"] == "Open"
-    assert response["current_status"] == "In Progress"
-    assert tickets.documents[0]["current_status_name"] == "In Progress"
-
-
-def test_move_ticket_status_updates_id_and_name_from_status_id(
-    monkeypatch, fake_collection, grant_project_role
-):
-    old_status_id = ObjectId()
-    target_status_id = ObjectId()
-    ticket_id = ObjectId()
-    project_id = ObjectId()
-    current_user = {"_id": ObjectId(), "role": "agent"}
-
-    statuses = fake_collection.__class__([{"_id": target_status_id, "name": "Done"}])
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(current_user["_id"]),
-                "ticket_code": "SUP-4",
-                "current_status_id": str(old_status_id),
-                "current_status_name": "In QA",
-                "resolved_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
-                "closed_date": datetime(2026, 7, 2, tzinfo=timezone.utc),
-            }
-        ]
-    )
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(old_status_id), str(target_status_id)],
-            }
-        ]
-    )
-
-    monkeypatch.setattr(ticket, "statuses_collection", statuses)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    grant_project_role(project_id, current_user["_id"], "member")
-
-    response = ticket.move_ticket_status(
-        str(ticket_id),
-        TicketStatusMove(target_status_id=str(target_status_id)),
-        current_user=current_user,
-    )
-
-    assert response == {"message": "Ticket status updated successfully"}
-    assert tickets.documents[0]["current_status_id"] == str(target_status_id)
-    assert tickets.documents[0]["current_status_name"] == "Done"
-    assert tickets.documents[0]["resolved_date"] == datetime(
-        2026, 7, 1, tzinfo=timezone.utc
-    )
-    assert tickets.documents[0]["closed_date"] == datetime(
-        2026, 7, 2, tzinfo=timezone.utc
-    )
-
-
-def test_move_ticket_status_updates_id_and_name_from_status_name(
-    monkeypatch, fake_collection, grant_project_role
-):
-    old_status_id = ObjectId()
-    target_status_id = ObjectId()
-    ticket_id = ObjectId()
-    project_id = ObjectId()
-    user_id = ObjectId()
-
-    statuses = fake_collection.__class__(
-        [{"_id": target_status_id, "name": "QA Passed"}]
-    )
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "current_status_id": str(old_status_id),
-                "current_status_name": "QA Failed",
-            }
-        ]
-    )
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(old_status_id), str(target_status_id)],
-            }
-        ]
-    )
-
-    monkeypatch.setattr(ticket, "statuses_collection", statuses)
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    grant_project_role(project_id, user_id, "member")
-
-    response = ticket.move_ticket_status(
-        str(ticket_id),
-        TicketStatusMove(target_status_name="qa passed"),
-        current_user={"_id": user_id, "role": "agent"},
-    )
-
-    assert response == {"message": "Ticket status updated successfully"}
-    assert tickets.documents[0]["current_status_id"] == str(target_status_id)
-    assert tickets.documents[0]["current_status_name"] == "QA Passed"
-
-
-def test_move_ticket_status_rejects_missing_target_status(
-    monkeypatch, fake_collection, grant_project_role
-):
-    ticket_id = ObjectId()
-    project_id = ObjectId()
-    user_id = ObjectId()
-
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "current_status_id": str(ObjectId()),
-            }
-        ]
-    )
-
-    monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(
-        ticket,
-        "projects_collection",
-        fake_collection.__class__([{"_id": project_id, "assigned_statuses": []}]),
-    )
-    grant_project_role(project_id, user_id, "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_status(
-            str(ticket_id),
-            TicketStatusMove(target_status_id=str(ObjectId())),
-            current_user={"_id": user_id, "role": "super_admin"},
-        )
-
-    assert exc_info.value.status_code == 404
-
-
-def test_move_ticket_forward_rejects_last_status(
-    monkeypatch, fake_collection, grant_project_role
-):
-    project_id = ObjectId()
-    open_id = ObjectId()
-    progress_id = ObjectId()
-    ticket_id = ObjectId()
-    current_user = {"_id": ObjectId(), "role": "agent"}
-
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [str(open_id), str(progress_id)],
-            }
-        ]
-    )
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(current_user["_id"]),
-                "ticket_code": "SUP-3",
-                "current_status_id": str(progress_id),
-                "current_status_name": "In Progress",
-            }
-        ]
-    )
-
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    grant_project_role(project_id, current_user["_id"], "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(str(ticket_id), current_user=current_user)
-
-    assert exc_info.value.status_code == 400
-
-
-def test_move_ticket_forward_rejects_missing_ticket(monkeypatch, fake_collection):
-    monkeypatch.setattr(ticket, "ticket_collection", fake_collection)
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
-            str(ObjectId()), current_user={"_id": ObjectId(), "role": "agent"}
-        )
-
-    assert exc_info.value.status_code == 404
-
-
-def test_move_ticket_forward_rejects_invalid_ticket_id(monkeypatch, fake_collection):
-    monkeypatch.setattr(ticket, "ticket_collection", fake_collection)
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
-            "invalid-ticket-id", current_user={"_id": ObjectId(), "role": "agent"}
-        )
-
-    assert exc_info.value.status_code == 400
-
-
-def test_move_ticket_forward_rejects_project_not_found(
-    monkeypatch, fake_collection, grant_project_role
-):
-    ticket_id = ObjectId()
-    project_id = ObjectId()
-    user_id = ObjectId()
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(ObjectId()),
-                "ticket_code": "SUP-3",
-                "current_status_id": str(ObjectId()),
-                "current_status_name": "Open",
-            }
-        ]
-    )
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "projects_collection", fake_collection.__class__())
-    grant_project_role(project_id, user_id, "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
-            str(ticket_id), current_user={"_id": user_id, "role": "super_admin"}
-        )
-
-    assert exc_info.value.status_code == 404
-
-
-def test_move_ticket_forward_rejects_status_not_in_project(
-    monkeypatch, fake_collection, grant_project_role
-):
-    project_id = ObjectId()
-    ticket_id = ObjectId()
-    user_id = ObjectId()
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(ObjectId()),
-                "ticket_code": "SUP-3",
-                "current_status_id": str(ObjectId()),
-                "current_status_name": "Open",
-            }
-        ]
-    )
-    projects = fake_collection.__class__(
-        [{"_id": project_id, "assigned_statuses": [str(ObjectId()), str(ObjectId())]}]
-    )
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    grant_project_role(project_id, user_id, "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
-            str(ticket_id), current_user={"_id": user_id, "role": "super_admin"}
-        )
-
-    assert exc_info.value.status_code == 400
-
-
-def test_move_ticket_forward_rejects_missing_next_status(
-    monkeypatch, fake_collection, grant_project_role
-):
-    project_id = ObjectId()
-    current_status = ObjectId()
-    next_status = ObjectId()
-    ticket_id = ObjectId()
-    user_id = ObjectId()
-    tickets = fake_collection.__class__(
-        [
-            {
-                "_id": ticket_id,
-                "project_id": str(project_id),
-                "userId": str(ObjectId()),
-                "ticket_code": "SUP-3",
-                "current_status_id": str(current_status),
-                "current_status_name": "Open",
-            }
-        ]
-    )
-    projects = fake_collection.__class__(
-        [
-            {
-                "_id": project_id,
-                "assigned_statuses": [
-                    str(current_status),
-                    str(next_status),
-                    str(ObjectId()),
-                ],
-            }
-        ]
-    )
-    monkeypatch.setattr(ticket, "ticket_collection", tickets)
-    monkeypatch.setattr(ticket, "projects_collection", projects)
-    monkeypatch.setattr(ticket, "statuses_collection", fake_collection.__class__())
-    grant_project_role(project_id, user_id, "member")
-
-    with pytest.raises(HTTPException) as exc_info:
-        ticket.move_ticket_forward(
-            str(ticket_id), current_user={"_id": user_id, "role": "super_admin"}
-        )
-
-    assert exc_info.value.status_code == 404
 
 
 def test_assign_ticket_allows_project_member_self_assign(
