@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
+from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     get_project_membership,
     parse_object_id,
@@ -15,6 +16,7 @@ from app.api.permissions import (
 from app.api.watcher_notifications import notify_ticket_watchers
 from app.db.db import (
     comments_collection,
+    notification_preferences_collection,
     notifications_collection,
     project_members_collection,
     ticket_collection,
@@ -26,7 +28,6 @@ from app.models.comment import (
     CommentUpdate,
     CommentVisibility,
 )
-from app.models.notifications import Notifications
 from app.models.project_member import ProjectRole
 
 router = APIRouter()
@@ -194,6 +195,7 @@ def _resolve_mentions(
 
 def _notify_mentions(
     *,
+    project_id: str | None,
     ticket_id: str,
     comment_id: str,
     actor_id,
@@ -206,18 +208,18 @@ def _notify_mentions(
     for user_id in mentioned_user_ids:
         if user_id in previous_user_ids:
             continue
-        notifications_collection.insert_one(
-            {
-                "ticket_id": ticket_id,
-                "comment_id": comment_id,
-                "user_id": user_id,
-                "actor_id": actor_id,
-                "event_type": MENTION_EVENT_TYPE,
-                "created_at": datetime.now(timezone.utc),
-                "is_read": False,
-            }
+        result = create_notification(
+            project_id=project_id,
+            ticket_id=ticket_id,
+            comment_id=comment_id,
+            user_id=user_id,
+            actor_id=actor_id,
+            event_type=MENTION_EVENT_TYPE,
+            notifications_collection=notifications_collection,
+            preferences_collection=notification_preferences_collection,
         )
-        notified += 1
+        if result is not None:
+            notified += 1
     return notified
 
 
@@ -308,14 +310,18 @@ def _create_comment_document(
             }
         ],
     )
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         comment_id=comment_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="comment_created",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notifications_collection.insert_one(notification.model_dump())
     _notify_mentions(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         comment_id=comment_id,
         actor_id=current_user["_id"],
@@ -327,6 +333,7 @@ def _create_comment_document(
         event_type="comment_created",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
         comment_id=comment_id,
     )
     return _serialize_comment(new_comment)
@@ -487,6 +494,7 @@ def update_comment(
     )
 
     _notify_mentions(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         comment_id=str(comment_object_id),
         actor_id=current_user["_id"],
@@ -499,6 +507,7 @@ def update_comment(
         event_type="comment_updated",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
         comment_id=str(comment_object_id),
     )
     log_activity(
@@ -563,6 +572,7 @@ def delete_comment(
         event_type="comment_deleted",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
         comment_id=comment_id,
     )
     log_activity(

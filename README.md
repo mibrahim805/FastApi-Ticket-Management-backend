@@ -335,7 +335,21 @@ a project lead, or a super admin can delete an attachment.
 | Method | Endpoint |
 |---------|----------|
 | GET | /notifications |
-| PUT | /notifications/{id}/read |
+| GET | /notifications/{notification_id} |
+| PUT | /notifications/{notification_id}/read |
+| PUT | /notifications/mark-all-read |
+| GET | /notifications/preferences/{project_id} |
+| PUT | /notifications/preferences/{project_id} |
+
+Notification delivery is enabled by default. A project member can disable all
+notifications for one project or opt out of specific event types:
+
+```json
+{
+  "enabled": true,
+  "disabled_event_types": ["ticket_transitioned", "comment_created"]
+}
+```
 
 ---
 
@@ -359,6 +373,8 @@ comments
 attachments
 
 notifications
+
+notification_preferences
 ```
 
 Projects are stored in `projects`, memberships in `project_members`, and tickets

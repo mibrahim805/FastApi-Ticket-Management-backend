@@ -13,6 +13,7 @@ projects_collection = db["projects"]
 ticket_collection = db["tickets"]
 comments_collection = db["comments"]
 notifications_collection = db["notifications"]
+notification_preferences_collection = db["notification_preferences"]
 reset_tokens_collection = db["reset_tokens"]
 statuses_collection = db["statuses"]
 attachment_collection = db["attachments"]
@@ -30,6 +31,7 @@ ISSUE_LINK_FROM_TICKET_INDEX = "issue_links_from_ticket"
 ISSUE_LINK_TO_TICKET_INDEX = "issue_links_to_ticket"
 TRANSITION_PROJECT_NAME_INDEX = "transitions_project_name"
 TRANSITION_PROJECT_SOURCE_INDEX = "transitions_project_source"
+NOTIFICATION_PREFERENCE_UNIQUE_INDEX = "notification_preferences_user_project_unique"
 
 
 def ensure_database_indexes() -> None:
@@ -64,6 +66,11 @@ def ensure_database_indexes() -> None:
     transitions_collection.create_index(
         [("project_id", ASCENDING), ("from_status_ids", ASCENDING)],
         name=TRANSITION_PROJECT_SOURCE_INDEX,
+    )
+    notification_preferences_collection.create_index(
+        [("user_id", ASCENDING), ("project_id", ASCENDING)],
+        name=NOTIFICATION_PREFERENCE_UNIQUE_INDEX,
+        unique=True,
     )
 
 

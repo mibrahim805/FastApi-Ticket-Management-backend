@@ -207,6 +207,11 @@ def ticket_activities(fake_collection):
 
 
 @pytest.fixture
+def notification_preferences(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def grant_project_role(project_members):
     def grant(project_id, user_id, role="lead"):
         project_object_id = (
@@ -231,6 +236,7 @@ def isolate_project_members_collection(monkeypatch, project_members):
         "app.api.activity",
         "app.api.project",
         "app.api.comment",
+        "app.api.notifications",
         "app.api.ticket",
         "app.api.ticket_attachment",
         "uploads.ticket_attachment",
@@ -240,6 +246,30 @@ def isolate_project_members_collection(monkeypatch, project_members):
             monkeypatch.setattr(module, "project_members_collection", project_members)
 
     return project_members
+
+
+@pytest.fixture(autouse=True)
+def isolate_notification_preferences_collection(
+    monkeypatch,
+    notification_preferences,
+):
+    for module_name in (
+        "app.api.comment",
+        "app.api.notifications",
+        "app.api.ticket",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(
+            module,
+            "notification_preferences_collection",
+        ):
+            monkeypatch.setattr(
+                module,
+                "notification_preferences_collection",
+                notification_preferences,
+            )
+
+    return notification_preferences
 
 
 @pytest.fixture(autouse=True)

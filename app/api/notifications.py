@@ -1,12 +1,23 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pymongo import ReturnDocument
 
 from app.api.auth import get_current_user
-from app.db.db import notifications_collection
+from app.api.permissions import require_project_membership
+from app.db.db import (
+    notification_preferences_collection,
+    notifications_collection,
+    project_members_collection,
+    projects_collection,
+)
+from app.models.notifications import (
+    NOTIFICATION_EVENT_TYPES,
+    NotificationPreferenceUpdate,
+)
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
@@ -16,6 +27,32 @@ def _parse_object_id(value: str, field_name: str) -> ObjectId:
         return ObjectId(value)
     except (InvalidId, TypeError):
         raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
+
+
+def _require_project_preference_access(
+    project_id: str,
+    current_user: dict,
+) -> str:
+    project_object_id = _parse_object_id(project_id, "project_id")
+    if not projects_collection.find_one({"_id": project_object_id}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+    )
+    return str(project_object_id)
+
+
+def _serialize_preference(preference: dict) -> dict:
+    serialized = dict(preference)
+    serialized.pop("_id", None)
+    serialized["disabled_event_types"] = sorted(
+        serialized.get("disabled_event_types") or []
+    )
+    serialized["available_event_types"] = sorted(NOTIFICATION_EVENT_TYPES)
+    return serialized
 
 
 @router.get("/", tags=["Notifications"])
@@ -49,11 +86,6 @@ def list_notifications(
 
     total_pages = (total_count + page_size - 1) // page_size
 
-    print("Query:", query)
-    print("Collection:", notifications_collection)
-    print("Documents:", notifications_collection.documents)
-    print("Count:", notifications_collection.count_documents(query))
-
     return {
         "data": notifications,
         "pagination": {
@@ -65,6 +97,64 @@ def list_notifications(
             "has_prev": page > 1,
         },
     }
+
+
+@router.get("/preferences/{project_id}")
+def get_notification_preferences(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    canonical_project_id = _require_project_preference_access(
+        project_id,
+        current_user,
+    )
+    user_id = str(current_user["_id"])
+    preference = notification_preferences_collection.find_one(
+        {
+            "user_id": user_id,
+            "project_id": canonical_project_id,
+        }
+    )
+    if not preference:
+        preference = {
+            "user_id": user_id,
+            "project_id": canonical_project_id,
+            "enabled": True,
+            "disabled_event_types": [],
+        }
+    return _serialize_preference(preference)
+
+
+@router.put("/preferences/{project_id}")
+def update_notification_preferences(
+    project_id: str,
+    payload: NotificationPreferenceUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    canonical_project_id = _require_project_preference_access(
+        project_id,
+        current_user,
+    )
+    query = {
+        "user_id": str(current_user["_id"]),
+        "project_id": canonical_project_id,
+    }
+    now = datetime.now(timezone.utc)
+    update_fields = {
+        "enabled": payload.enabled,
+        "disabled_event_types": sorted(payload.disabled_event_types),
+        "updated_at": now,
+    }
+    if not notification_preferences_collection.find_one(query):
+        update_fields["created_at"] = now
+
+    preference = notification_preferences_collection.find_one_and_update(
+        query,
+        {"$set": update_fields},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return _serialize_preference(preference)
 
 
 @router.get("/{notification_id}", tags=["Notifications"])
@@ -107,7 +197,7 @@ def mark_as_read(
 
     notifications_collection.update_one(
         {"_id": _parse_object_id(notification_id, "notification_id")},
-        {"$set": {"is_read": True, "read_at": datetime.utcnow()}},
+        {"$set": {"is_read": True, "read_at": datetime.now(timezone.utc)}},
     )
 
     return {"message": "Notification marked as read"}
@@ -117,7 +207,7 @@ def mark_as_read(
 def mark_all_as_read(current_user: dict = Depends(get_current_user)):
     notifications_collection.update_many(
         {"user_id": str(current_user["_id"]), "is_read": False},
-        {"$set": {"is_read": True, "read_at": datetime.utcnow()}},
+        {"$set": {"is_read": True, "read_at": datetime.now(timezone.utc)}},
     )
 
     return {"message": "All notifications marked as read"}

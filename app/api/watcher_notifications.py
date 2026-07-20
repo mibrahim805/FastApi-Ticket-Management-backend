@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from app.api.notification_delivery import create_notification
 
 
 def notify_ticket_watchers(
@@ -8,6 +8,7 @@ def notify_ticket_watchers(
     event_type: str,
     actor_id,
     notifications_collection,
+    preferences_collection,
     comment_id: str | None = None,
 ) -> int:
     """Notify every watcher except the user who triggered the event."""
@@ -16,15 +17,16 @@ def notify_ticket_watchers(
     for watcher_id in dict.fromkeys(map(str, ticket.get("watchers") or [])):
         if watcher_id == actor_id:
             continue
-        notification = {
-            "ticket_id": ticket_id,
-            "user_id": watcher_id,
-            "event_type": event_type,
-            "created_at": datetime.now(timezone.utc),
-            "is_read": False,
-        }
-        if comment_id is not None:
-            notification["comment_id"] = comment_id
-        notifications_collection.insert_one(notification)
-        notified += 1
+        result = create_notification(
+            ticket_id=ticket_id,
+            project_id=ticket.get("project_id"),
+            comment_id=comment_id,
+            user_id=watcher_id,
+            actor_id=actor_id,
+            event_type=event_type,
+            notifications_collection=notifications_collection,
+            preferences_collection=preferences_collection,
+        )
+        if result is not None:
+            notified += 1
     return notified

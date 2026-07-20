@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
+from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     PROJECT_LEAD_ROLES,
     PROJECT_MEMBER_ROLES,
@@ -24,6 +25,7 @@ from app.db.db import (
     comments_collection,
     counters_collection,
     issue_links_collection,
+    notification_preferences_collection,
     notifications_collection,
     project_members_collection,
     projects_collection,
@@ -32,7 +34,6 @@ from app.db.db import (
     transitions_collection,
     user_collection,
 )
-from app.models.notifications import Notifications
 from app.models.project_member import ProjectRole
 from app.models.ticket import (
     AssignAgent,
@@ -249,12 +250,22 @@ def _apply_ticket_transition(
             status_code=409,
             detail="Ticket status changed before the transition could be applied",
         )
+    create_notification(
+        project_id=ticket.get("project_id"),
+        ticket_id=ticket_object_id,
+        user_id=current_user["_id"],
+        actor_id=current_user["_id"],
+        event_type="ticket_transitioned",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
+    )
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=str(ticket_object_id),
         event_type="ticket_transitioned",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     log_activity(
         ticket_id=str(ticket_object_id),
@@ -449,13 +460,17 @@ def create_ticket(
         changed_by=current_user["_id"],
     )
 
-    notification = Notifications(
+    notification_record = create_notification(
+        project_id=ticket["project_id"],
         ticket_id=ticket["_id"],
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_created",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notification_record = notifications_collection.insert_one(notification.model_dump())
-    ticket["notification_id"] = str(notification_record.inserted_id)
+    if notification_record is not None:
+        ticket["notification_id"] = str(notification_record.inserted_id)
 
     return _serialize_ticket(ticket)
 
@@ -735,6 +750,7 @@ def create_ticket_link(
         event_type="ticket_linked",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     notify_ticket_watchers(
         ticket=to_ticket,
@@ -742,6 +758,7 @@ def create_ticket_link(
         event_type="ticket_linked",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     return _serialize_issue_link(link)
 
@@ -807,19 +824,22 @@ def update_ticket(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_updated",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-
-    notifications_collection.insert_one(notification.model_dump())
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=ticket_id,
         event_type="ticket_updated",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     if changes:
         log_activity(
@@ -902,18 +922,22 @@ def assign_ticket(
         ],
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_assigned",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notifications_collection.insert_one(notification.model_dump())
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=ticket_id,
         event_type="ticket_assigned",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
 
     return {"message": "Ticket assigned successfully"}
@@ -1225,6 +1249,7 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         event_type="ticket_deleted",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     log_activity(
         ticket_id=ticket_id,
@@ -1248,11 +1273,14 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         }
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_deleted",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Ticket deleted successfully"}
