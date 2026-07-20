@@ -11,9 +11,9 @@ from app.api import (
     reports,
     status,
     ticket,
+    ticket_attachment,
 )
 from app.db.db import ensure_database_indexes, migrate_legacy_workflow_transitions
-from uploads import ticket_attachment
 
 
 @asynccontextmanager

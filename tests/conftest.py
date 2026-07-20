@@ -232,6 +232,7 @@ def isolate_project_members_collection(monkeypatch, project_members):
         "app.api.project",
         "app.api.comment",
         "app.api.ticket",
+        "app.api.ticket_attachment",
         "uploads.ticket_attachment",
     ):
         module = sys.modules.get(module_name)

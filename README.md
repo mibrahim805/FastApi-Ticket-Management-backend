@@ -316,6 +316,20 @@ their parent comments.
 
 ---
 
+## Attachments
+
+| Method | Endpoint |
+|---------|----------|
+| POST | /tickets/{ticket_id}/attachments |
+| GET | /tickets/{ticket_id}/attachments |
+| GET | /attachments/{attachment_id} |
+| DELETE | /attachments/{attachment_id} |
+
+All attachment operations require access to the owning ticket. Only the uploader,
+a project lead, or a super admin can delete an attachment.
+
+---
+
 ## Notifications
 
 | Method | Endpoint |
@@ -342,6 +356,8 @@ tickets
 
 comments
 
+attachments
+
 notifications
 ```
 
@@ -351,6 +367,36 @@ transitions are stored separately in `transitions` and reference their project.
 
 This is a breaking storage-schema change for databases created by earlier
 versions. Migrate existing collections and reference fields before deployment.
+
+## Attachment storage
+
+Development uses local storage by default:
+
+```env
+ATTACHMENT_STORAGE_BACKEND=local
+ATTACHMENT_LOCAL_DIR=uploads/tickets
+```
+
+Production can use AWS S3 or another S3-compatible service through the same API:
+
+```env
+ATTACHMENT_STORAGE_BACKEND=s3
+ATTACHMENT_S3_BUCKET=ticket-attachments
+ATTACHMENT_S3_PREFIX=production
+ATTACHMENT_S3_REGION=us-east-1
+ATTACHMENT_S3_ENDPOINT_URL=https://s3.example.com
+ATTACHMENT_S3_ADDRESSING_STYLE=path
+ATTACHMENT_S3_SSE=AES256
+```
+
+`ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_PREFIX`, and `ATTACHMENT_S3_SSE` are
+optional. Boto3 uses its normal credential provider chain, so production should
+prefer workload or instance credentials; `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` can be used for local S3-compatible services.
+
+Attachment metadata records its storage backend and object key. Migrate existing
+local objects and metadata before changing a deployed environment from `local` to
+`s3`.
 
 ---
 
@@ -399,6 +445,13 @@ pip install -r requirements.txt
 # 🔑 Environment Variables
 
 Create a `.env` file.
+
+The application loads this file automatically at startup. Copy `.env.example`
+and replace its placeholder values:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 MONGO_URI=mongodb://localhost:27017

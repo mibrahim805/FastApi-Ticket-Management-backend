@@ -12,3 +12,6 @@ class Attachment(BaseModel):
     size: int
     uploaded_by: str
     uploaded_at: datetime
+    storage_backend: str = "local"
+    storage_key: str | None = None
+    checksum_sha256: str | None = None
