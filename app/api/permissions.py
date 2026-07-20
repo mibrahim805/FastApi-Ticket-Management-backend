@@ -39,6 +39,27 @@ def get_project_membership(
     )
 
 
+def get_accessible_project_ids(
+    current_user: dict,
+    project_members_collection,
+    projects_collection,
+) -> list[str]:
+    """Return canonical project IDs the current user is allowed to browse."""
+    if current_user.get("role") == "super_admin":
+        return [str(project["_id"]) for project in projects_collection.find({})]
+
+    user_id = parse_object_id(current_user.get("_id"), "user_id")
+    memberships = project_members_collection.find({"user_id": user_id})
+    return list(
+        dict.fromkeys(
+            str(membership["project_id"])
+            for membership in memberships
+            if membership.get("project_id")
+            and membership.get("role") in PROJECT_MEMBER_ROLES
+        )
+    )
+
+
 def require_project_membership(
     project_id: str | ObjectId,
     current_user: dict,

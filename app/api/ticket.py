@@ -1004,6 +1004,233 @@ def bulk_transition_tickets(
     }
 
 
+def _build_ticket_list_query(
+    *,
+    project_ids: List[str],
+    status: Optional[str],
+    priority: Optional[str],
+    category: Optional[str],
+    issue_type: Optional[IssueType],
+    labels: Optional[List[str]],
+    epic_id: Optional[str],
+    assigned_agent: Optional[str],
+    search: Optional[str],
+    overdue_only: Optional[bool],
+) -> dict:
+    if len(project_ids) == 1:
+        query = {"project_id": project_ids[0]}
+    else:
+        query = {"project_id": {"$in": project_ids}}
+
+    if status:
+        query["status"] = status.lower()
+    if priority:
+        query["priority"] = priority.lower()
+    if category:
+        query["category"] = category
+    if issue_type:
+        if issue_type == IssueType.TASK:
+            query["issue_type"] = {"$in": [IssueType.TASK.value, None]}
+        else:
+            query["issue_type"] = issue_type.value
+    if labels:
+        query["labels"] = {"$all": list(dict.fromkeys(labels))}
+    if epic_id:
+        query["epic_id"] = str(_parse_object_id(epic_id, "epic_id"))
+    if assigned_agent:
+        query["assigned_agent"] = assigned_agent
+    if overdue_only:
+        query["$expr"] = {
+            "$and": [
+                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
+                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
+            ]
+        }
+    if search:
+        search_regex = re.compile(re.escape(search), re.IGNORECASE)
+        query["$or"] = [
+            {"title": {"$regex": search_regex}},
+            {"ticket_code": {"$regex": search_regex}},
+            {"description": {"$regex": search_regex}},
+        ]
+    return query
+
+
+def _paginate_ticket_query(
+    *,
+    query: dict,
+    page: int,
+    page_size: int,
+    sort_by: Optional[str],
+    sort_order: Optional[str],
+) -> tuple[list[dict], dict]:
+    sort_field_map = {
+        "created_at": "created_date",
+        "priority": "priority",
+        "due_date": "due_date",
+    }
+    mongo_sort_field = sort_field_map.get(sort_by, "created_date")
+    mongo_sort_dir = 1 if sort_order == "asc" else -1
+    total_count = ticket_collection.count_documents(query)
+    cursor = (
+        ticket_collection.find(query)
+        .sort(mongo_sort_field, mongo_sort_dir)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    tickets = []
+    now = datetime.now(timezone.utc)
+    for ticket in cursor:
+        if ticket.get("due_date") and ticket.get("current_status_name") not in [
+            "resolved",
+            "closed",
+        ]:
+            ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
+        else:
+            ticket["is_overdue"] = False
+        tickets.append(_serialize_ticket(ticket))
+
+    total_pages = (total_count + page_size - 1) // page_size
+    return tickets, {
+        "total": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": page > 1,
+    }
+
+
+def _ticket_filters_applied(
+    *,
+    status: Optional[str],
+    priority: Optional[str],
+    category: Optional[str],
+    issue_type: Optional[IssueType],
+    labels: Optional[List[str]],
+    epic_id: Optional[str],
+    assigned_agent: Optional[str],
+    search: Optional[str],
+    overdue_only: Optional[bool],
+    sort_by: Optional[str],
+    sort_order: Optional[str],
+) -> dict:
+    return {
+        "status": status,
+        "priority": priority,
+        "category": category,
+        "issue_type": issue_type.value if issue_type else None,
+        "labels": labels,
+        "epic_id": epic_id,
+        "assigned_agent": assigned_agent,
+        "search": search,
+        "overdue_only": overdue_only,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+    }
+
+
+def _accessible_project_ids(current_user: dict) -> List[str]:
+    if current_user.get("role") == "super_admin":
+        return [str(project["_id"]) for project in projects_collection.find({})]
+
+    user_id = parse_object_id(current_user.get("_id"), "user_id")
+    memberships = project_members_collection.find({"user_id": user_id})
+    return list(
+        dict.fromkeys(
+            str(membership["project_id"])
+            for membership in memberships
+            if membership.get("project_id")
+            and membership.get("role") in PROJECT_MEMBER_ROLES
+        )
+    )
+
+
+@router.get("/tickets/search", tags=["Tickets"])
+def search_tickets(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Results per page"),
+    status: Optional[str] = Query(
+        None, description="Filter by status (e.g. open, closed, pending)"
+    ),
+    priority: Optional[str] = Query(
+        None, description="Filter by priority (e.g. low, medium, high)"
+    ),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    issue_type: Annotated[
+        Optional[IssueType],
+        Query(description="Filter by issue type"),
+    ] = None,
+    labels: Annotated[
+        Optional[List[str]],
+        Query(description="Filter by all supplied labels; repeat for multiple labels"),
+    ] = None,
+    epic_id: Annotated[
+        Optional[str],
+        Query(description="Filter by parent epic ID"),
+    ] = None,
+    assigned_agent: Optional[str] = Query(
+        None, description="Filter by assigned agent ID"
+    ),
+    search: Optional[str] = Query(
+        None,
+        max_length=200,
+        description="Search across title, ticket number, and description",
+    ),
+    overdue_only: Optional[bool] = Query(
+        None, description="Filter to show only overdue tickets"
+    ),
+    sort_by: Optional[str] = Query(
+        "created_at",
+        pattern="^(created_at|priority|due_date)$",
+        description="Sort field",
+    ),
+    sort_order: Optional[str] = Query(
+        "desc", pattern="^(asc|desc)$", description="Sort direction"
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    project_ids = _accessible_project_ids(current_user)
+    query = _build_ticket_list_query(
+        project_ids=project_ids,
+        status=status,
+        priority=priority,
+        category=category,
+        issue_type=issue_type,
+        labels=labels,
+        epic_id=epic_id,
+        assigned_agent=assigned_agent,
+        search=search,
+        overdue_only=overdue_only,
+    )
+    tickets, pagination = _paginate_ticket_query(
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    return {
+        "data": tickets,
+        "pagination": pagination,
+        "scope": "all_accessible_projects",
+        "filters_applied": _ticket_filters_applied(
+            status=status,
+            priority=priority,
+            category=category,
+            issue_type=issue_type,
+            labels=labels,
+            epic_id=epic_id,
+            assigned_agent=assigned_agent,
+            search=search,
+            overdue_only=overdue_only,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        ),
+    }
+
+
 @router.get("/tickets/{project_key}", tags=["Tickets"])
 def get_tickets(
     project_key: str,
@@ -1024,10 +1251,18 @@ def get_tickets(
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
     ] = None,
+    epic_id: Annotated[
+        Optional[str],
+        Query(description="Filter by parent epic ID"),
+    ] = None,
     assigned_agent: Optional[str] = Query(
         None, description="Filter by assigned agent ID"
     ),
-    search: Optional[str] = Query(None, description="Search by title or ticket number"),
+    search: Optional[str] = Query(
+        None,
+        max_length=200,
+        description="Search across title, ticket number, and description",
+    ),
     overdue_only: Optional[bool] = Query(
         None, description="Filter to show only overdue tickets"
     ),
@@ -1041,7 +1276,6 @@ def get_tickets(
     ),
     current_user: dict = Depends(get_current_user),
 ):
-    query = {}
     project = projects_collection.find_one({"code": project_key})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1051,97 +1285,41 @@ def get_tickets(
         current_user,
         project_members_collection,
     )
-
-    query["project_id"] = str(project["_id"])
-    if status:
-        query["status"] = status.lower()
-    if priority:
-        query["priority"] = priority.lower()
-    if category:
-        query["category"] = category
-    if issue_type:
-        if issue_type == IssueType.TASK:
-            query["issue_type"] = {"$in": [IssueType.TASK.value, None]}
-        else:
-            query["issue_type"] = issue_type.value
-    if labels:
-        query["labels"] = {"$all": labels}
-    if assigned_agent:
-        query["assigned_agent"] = assigned_agent
-
-    if overdue_only:
-        query["$expr"] = {
-            "$and": [
-                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
-                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
-            ]
-        }
-
-    if search:
-        search_regex = re.compile(re.escape(search), re.IGNORECASE)
-        search_query = [
-            {"title": {"$regex": search_regex}},
-            {"ticket_code": {"$regex": search_regex}},
-        ]
-        if "$or" in query:
-            query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_query}]
-        else:
-            query["$or"] = search_query
-
-    SORT_FIELD_MAP = {
-        "created_at": "created_date",
-        "priority": "priority",
-        "due_date": "due_date",
-    }
-    mongo_sort_field = SORT_FIELD_MAP.get(sort_by, "created_date")
-    mongo_sort_dir = 1 if sort_order == "asc" else -1
-
-    skip = (page - 1) * page_size
-    limit = page_size
-
-    total_count = ticket_collection.count_documents(query)
-    cursor = (
-        ticket_collection.find(query)
-        .sort(mongo_sort_field, mongo_sort_dir)
-        .skip(skip)
-        .limit(limit)
+    query = _build_ticket_list_query(
+        project_ids=[str(project["_id"])],
+        status=status,
+        priority=priority,
+        category=category,
+        issue_type=issue_type,
+        labels=labels,
+        epic_id=epic_id,
+        assigned_agent=assigned_agent,
+        search=search,
+        overdue_only=overdue_only,
     )
-
-    tickets = []
-    now = datetime.now(timezone.utc)
-    for ticket in cursor:
-        if ticket.get("due_date") and ticket.get("current_status_name") not in [
-            "resolved",
-            "closed",
-        ]:
-            ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
-        else:
-            ticket["is_overdue"] = False
-        tickets.append(_serialize_ticket(ticket))
-
-    total_pages = (total_count + page_size - 1) // page_size
-
+    tickets, pagination = _paginate_ticket_query(
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
     return {
         "data": tickets,
-        "pagination": {
-            "total": total_count,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_prev": page > 1,
-        },
-        "filters_applied": {
-            "status": status,
-            "priority": priority,
-            "category": category,
-            "issue_type": issue_type.value if issue_type else None,
-            "labels": labels,
-            "assigned_agent": assigned_agent,
-            "search": search,
-            "sort_by": sort_by,
-            "sort_order": sort_order,
-        },
+        "pagination": pagination,
+        "filters_applied": _ticket_filters_applied(
+            status=status,
+            priority=priority,
+            category=category,
+            issue_type=issue_type,
+            labels=labels,
+            epic_id=epic_id,
+            assigned_agent=assigned_agent,
+            search=search,
+            overdue_only=overdue_only,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        ),
     }
 
 

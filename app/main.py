@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from app.api import (
     activity,
     comment,
+    filters,
     notifications,
     project,
     registration,
@@ -30,6 +31,7 @@ app.include_router(registration.router)
 app.include_router(project.router)
 app.include_router(ticket.router)
 app.include_router(comment.router)
+app.include_router(filters.router)
 app.include_router(status.router)
 app.include_router(activity.router)
 app.include_router(notifications.router)

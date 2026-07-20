@@ -42,6 +42,7 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     issue_link_calls = []
     transition_calls = []
     notification_preference_calls = []
+    saved_filter_calls = []
 
     class RecordingCollection:
         def __init__(self, calls):
@@ -69,6 +70,11 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
         database,
         "notification_preferences_collection",
         RecordingCollection(notification_preference_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "saved_filters_collection",
+        RecordingCollection(saved_filter_calls),
     )
 
     database.ensure_database_indexes()
@@ -119,6 +125,15 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
             [("user_id", 1), ("project_id", 1)],
             {
                 "name": "notification_preferences_user_project_unique",
+                "unique": True,
+            },
+        )
+    ]
+    assert saved_filter_calls == [
+        (
+            [("user_id", 1), ("name_key", 1)],
+            {
+                "name": "saved_filters_user_name_unique",
                 "unique": True,
             },
         )

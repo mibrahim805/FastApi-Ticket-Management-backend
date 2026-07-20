@@ -212,6 +212,11 @@ def notification_preferences(fake_collection):
 
 
 @pytest.fixture
+def saved_filters(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def grant_project_role(project_members):
     def grant(project_id, user_id, role="lead"):
         project_object_id = (
@@ -237,6 +242,7 @@ def isolate_project_members_collection(monkeypatch, project_members):
         "app.api.project",
         "app.api.comment",
         "app.api.notifications",
+        "app.api.reports",
         "app.api.ticket",
         "app.api.ticket_attachment",
         "uploads.ticket_attachment",
@@ -270,6 +276,15 @@ def isolate_notification_preferences_collection(
             )
 
     return notification_preferences
+
+
+@pytest.fixture(autouse=True)
+def isolate_saved_filters_collection(monkeypatch, saved_filters):
+    module = sys.modules.get("app.api.filters")
+    if module is not None:
+        monkeypatch.setattr(module, "saved_filters_collection", saved_filters)
+
+    return saved_filters
 
 
 @pytest.fixture(autouse=True)

@@ -293,11 +293,41 @@ Authorization: Bearer <your_token>
 |---------|----------|
 | POST | /tickets |
 | GET | /tickets |
+| GET | /tickets/search |
+| GET | /tickets/{project_key} |
 | GET | /tickets/{id} |
 | PUT | /tickets/{id} |
 | DELETE | /tickets/{id} |
 | GET | /tickets/{ticket_id}/transitions |
 | POST | /{ticket_id}/transitions/{transition_id} |
+
+Board and global ticket search support status, priority, category, issue type,
+labels, epic, assignee, overdue, and sorting filters. Text search matches ticket
+number, title, and description. Global search returns only projects the current
+user can access; a super-admin can search every project.
+
+---
+
+## Saved filters
+
+| Method | Endpoint |
+|---------|----------|
+| GET | /filters |
+| POST | /filters |
+| DELETE | /filters/{filter_id} |
+
+Saved filters belong to the authenticated user. Example request:
+
+```json
+{
+  "name": "Urgent backend work",
+  "query_params": {
+    "scope": "global",
+    "priority": "urgent",
+    "labels": ["backend"]
+  }
+}
+```
 
 ---
 
@@ -375,6 +405,8 @@ attachments
 notifications
 
 notification_preferences
+
+saved_filters
 ```
 
 Projects are stored in `projects`, memberships in `project_members`, and tickets
