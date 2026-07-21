@@ -1,11 +1,201 @@
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.auth import get_current_user
-from app.db.db import ticket_collection, user_collection
+from app.api.permissions import (
+    get_accessible_project_ids,
+    parse_object_id,
+    require_project_membership,
+)
+from app.db.db import (
+    project_members_collection,
+    projects_collection,
+    ticket_collection,
+    user_collection,
+)
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+
+TERMINAL_STATUS_NAMES = frozenset({"resolved", "closed", "done"})
+
+
+def _normalized_status(ticket: dict) -> str:
+    return (
+        str(ticket.get("current_status_name") or "unknown")
+        .strip()
+        .casefold()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def _is_open_ticket(ticket: dict) -> bool:
+    if ticket.get("closed_date") is not None or ticket.get("resolved_date") is not None:
+        return False
+    return _normalized_status(ticket) not in TERMINAL_STATUS_NAMES
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _is_overdue_ticket(ticket: dict, now: datetime) -> bool:
+    due_date = ticket.get("due_date")
+    return bool(due_date and _is_open_ticket(ticket) and _as_aware_utc(due_date) < now)
+
+
+def _ticket_recency(ticket: dict) -> datetime:
+    value = ticket.get("updated_at") or ticket.get("created_date")
+    if isinstance(value, datetime):
+        return _as_aware_utc(value)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _serialize_dashboard_ticket(ticket: dict, now: datetime) -> dict:
+    ticket_id = ticket.get("_id")
+    return {
+        "ticket_id": str(ticket_id) if isinstance(ticket_id, ObjectId) else ticket_id,
+        "ticket_code": ticket.get("ticket_code"),
+        "project_id": str(ticket.get("project_id")),
+        "title": ticket.get("title"),
+        "priority": ticket.get("priority"),
+        "current_status_name": ticket.get("current_status_name"),
+        "due_date": ticket.get("due_date"),
+        "is_overdue": _is_overdue_ticket(ticket, now),
+    }
+
+
+def _empty_user_dashboard(user_id: str) -> dict:
+    return {
+        "user_id": user_id,
+        "project_count": 0,
+        "counts": {
+            "my_open_issues": 0,
+            "assigned_to_me": 0,
+            "overdue_assigned_to_me": 0,
+        },
+        "my_open_issues": [],
+        "assigned_to_me": [],
+    }
+
+
+@router.get("/my-dashboard")
+def get_my_dashboard(
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100, description="Issues per dashboard list"),
+    ] = 20,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return active issues created by or assigned to the current user."""
+    user_id = str(parse_object_id(current_user.get("_id"), "user_id"))
+    project_ids = get_accessible_project_ids(
+        current_user,
+        project_members_collection,
+        projects_collection,
+    )
+    if not project_ids:
+        return _empty_user_dashboard(user_id)
+
+    candidates = list(
+        ticket_collection.find(
+            {
+                "project_id": {"$in": project_ids},
+                "$or": [
+                    {"userId": user_id},
+                    {"assigned_agent": user_id},
+                ],
+            }
+        )
+    )
+    my_open_issues = [
+        ticket
+        for ticket in candidates
+        if str(ticket.get("userId")) == user_id and _is_open_ticket(ticket)
+    ]
+    assigned_to_me = [
+        ticket
+        for ticket in candidates
+        if str(ticket.get("assigned_agent")) == user_id and _is_open_ticket(ticket)
+    ]
+    my_open_issues.sort(key=_ticket_recency, reverse=True)
+    assigned_to_me.sort(key=_ticket_recency, reverse=True)
+    now = datetime.now(timezone.utc)
+
+    return {
+        "user_id": user_id,
+        "project_count": len(project_ids),
+        "counts": {
+            "my_open_issues": len(my_open_issues),
+            "assigned_to_me": len(assigned_to_me),
+            "overdue_assigned_to_me": sum(
+                _is_overdue_ticket(ticket, now) for ticket in assigned_to_me
+            ),
+        },
+        "my_open_issues": [
+            _serialize_dashboard_ticket(ticket, now)
+            for ticket in my_open_issues[:limit]
+        ],
+        "assigned_to_me": [
+            _serialize_dashboard_ticket(ticket, now)
+            for ticket in assigned_to_me[:limit]
+        ],
+    }
+
+
+@router.get("/projects/{project_id}/summary")
+def report_project_summary(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return workflow-independent ticket counts for one project."""
+    project_object_id = parse_object_id(project_id, "project_id")
+    project = projects_collection.find_one({"_id": project_object_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if current_user.get("role") not in {"admin", "super_admin"}:
+        require_project_membership(
+            project_object_id,
+            current_user,
+            project_members_collection,
+        )
+
+    tickets = list(ticket_collection.find({"project_id": str(project_object_id)}))
+    by_status = {}
+    by_priority = {}
+    assigned_tickets = 0
+    overdue_tickets = 0
+    open_tickets = 0
+    now = datetime.now(timezone.utc)
+    for ticket in tickets:
+        ticket_status = _normalized_status(ticket)
+        priority = str(ticket.get("priority") or "unknown").casefold()
+        by_status[ticket_status] = by_status.get(ticket_status, 0) + 1
+        by_priority[priority] = by_priority.get(priority, 0) + 1
+        assigned_tickets += bool(ticket.get("assigned_agent"))
+        open_tickets += _is_open_ticket(ticket)
+        overdue_tickets += _is_overdue_ticket(ticket, now)
+
+    return {
+        "project": {
+            "project_id": str(project_object_id),
+            "code": project.get("code"),
+            "name": project.get("name"),
+        },
+        "total_tickets": len(tickets),
+        "open_tickets": open_tickets,
+        "assigned_tickets": assigned_tickets,
+        "unassigned_tickets": len(tickets) - assigned_tickets,
+        "overdue_tickets": overdue_tickets,
+        "by_status": by_status,
+        "by_priority": by_priority,
+    }
 
 
 @router.get("/agent-tickets", tags=["Reports"])

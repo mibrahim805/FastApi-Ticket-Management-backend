@@ -331,6 +331,27 @@ Saved filters belong to the authenticated user. Example request:
 
 ---
 
+## Reporting and dashboards
+
+| Method | Endpoint |
+|---------|----------|
+| GET | /reports/my-dashboard |
+| GET | /reports/projects/{project_id}/summary |
+| GET | /reports/agent-tickets |
+| GET | /reports/overdue-tickets |
+| GET | /reports/avg-resolution-time |
+| GET | /tickets_summary?project_id={project_id} |
+
+The personal dashboard returns the current user's active created and assigned
+issues only from projects they can access. Project summaries use dynamic status
+and priority buckets, so custom workflows are supported. Administrative aggregate
+reports remain restricted to admins and super-admins.
+
+Sprint and velocity reporting is intentionally deferred until the sprint model
+and ticket-to-sprint relationship from section 12 are implemented.
+
+---
+
 ## Comments
 
 | Method | Endpoint |

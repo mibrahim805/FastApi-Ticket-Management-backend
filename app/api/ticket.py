@@ -13,10 +13,9 @@ from app.api.auth import get_current_user
 from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     PROJECT_LEAD_ROLES,
-    PROJECT_MEMBER_ROLES,
     PROJECT_WORK_ROLES,
+    get_accessible_project_ids,
     get_project_membership,
-    parse_object_id,
     require_project_membership,
     require_ticket_membership,
 )
@@ -1131,22 +1130,6 @@ def _ticket_filters_applied(
     }
 
 
-def _accessible_project_ids(current_user: dict) -> List[str]:
-    if current_user.get("role") == "super_admin":
-        return [str(project["_id"]) for project in projects_collection.find({})]
-
-    user_id = parse_object_id(current_user.get("_id"), "user_id")
-    memberships = project_members_collection.find({"user_id": user_id})
-    return list(
-        dict.fromkeys(
-            str(membership["project_id"])
-            for membership in memberships
-            if membership.get("project_id")
-            and membership.get("role") in PROJECT_MEMBER_ROLES
-        )
-    )
-
-
 @router.get("/tickets/search", tags=["Tickets"])
 def search_tickets(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
@@ -1191,7 +1174,11 @@ def search_tickets(
     ),
     current_user: dict = Depends(get_current_user),
 ):
-    project_ids = _accessible_project_ids(current_user)
+    project_ids = get_accessible_project_ids(
+        current_user,
+        project_members_collection,
+        projects_collection,
+    )
     query = _build_ticket_list_query(
         project_ids=project_ids,
         status=status,
@@ -1324,17 +1311,31 @@ def get_tickets(
 
 
 @router.get("/tickets_summary", tags=["Tickets"])
-def get_tickets_summary(current_user: dict = Depends(get_current_user)):
-    user_id = parse_object_id(current_user.get("_id"), "user_id")
-    memberships = list(project_members_collection.find({"user_id": user_id}))
-    project_ids = list(
-        {
-            str(membership["project_id"])
-            for membership in memberships
-            if membership.get("project_id")
-            and membership.get("role") in PROJECT_MEMBER_ROLES
-        }
-    )
+def get_tickets_summary(
+    project_id: Annotated[
+        Optional[str],
+        Query(description="Limit the summary to one accessible project"),
+    ] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    if project_id is not None:
+        project_object_id = _parse_object_id(project_id, "project_id")
+        project = projects_collection.find_one({"_id": project_object_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        require_project_membership(
+            project_object_id,
+            current_user,
+            project_members_collection,
+            allow_super_admin=True,
+        )
+        project_ids = [str(project_object_id)]
+    else:
+        project_ids = get_accessible_project_ids(
+            current_user,
+            project_members_collection,
+            projects_collection,
+        )
     if not project_ids:
         return {}
 
