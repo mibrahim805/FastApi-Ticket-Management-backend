@@ -7,11 +7,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+from app.config import get_settings
 from app.db.db import user_collection
 
-SECRET_KEY = "ibrahim805"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+settings = get_settings()
+SECRET_KEY = settings.secret_key.get_secret_value()
+ALGORITHM = settings.jwt_algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
+PASSWORD_RESET_EXPIRE_MINUTES = settings.password_reset_expire_minutes
 
 security_scheme = HTTPBearer()
 
@@ -62,7 +65,8 @@ def create_password_reset_token(reset_tokens_collection, user):
         "email": user["email"],
         "type": "password_reset",
         "used": False,
-        "expires_at": datetime.utcnow() + timedelta(minutes=15),
+        "expires_at": datetime.utcnow()
+        + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES),
     }
 
     reset_tokens_collection.insert_one(doc)

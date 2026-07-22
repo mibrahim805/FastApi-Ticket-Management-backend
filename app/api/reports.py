@@ -6,18 +6,27 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.auth import get_current_user
 from app.api.permissions import (
+    ADMIN_ROLES,
+    ensure_role,
     get_accessible_project_ids,
     parse_object_id,
     require_project_membership,
+    require_role,
 )
 from app.db.db import (
     project_members_collection,
     projects_collection,
+    sprints_collection,
     ticket_collection,
     user_collection,
 )
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+
+_require_admin = require_role(
+    *ADMIN_ROLES,
+    detail="Only admins can access reports",
+)
 
 TERMINAL_STATUS_NAMES = frozenset({"resolved", "closed", "done"})
 
@@ -65,6 +74,8 @@ def _serialize_dashboard_ticket(ticket: dict, now: datetime) -> dict:
         "title": ticket.get("title"),
         "priority": ticket.get("priority"),
         "current_status_name": ticket.get("current_status_name"),
+        "sprint_id": ticket.get("sprint_id"),
+        "story_points": ticket.get("story_points"),
         "due_date": ticket.get("due_date"),
         "is_overdue": _is_overdue_ticket(ticket, now),
     }
@@ -82,6 +93,34 @@ def _empty_user_dashboard(user_id: str) -> dict:
         "my_open_issues": [],
         "assigned_to_me": [],
     }
+
+
+def _story_points(ticket: dict) -> int:
+    value = ticket.get("story_points")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _sprint_recency(sprint: dict) -> datetime:
+    value = (
+        sprint.get("completed_at") or sprint.get("end_date") or sprint.get("created_at")
+    )
+    if isinstance(value, datetime):
+        return _as_aware_utc(value)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _require_project_report_access(
+    project_object_id: ObjectId,
+    current_user: dict,
+) -> None:
+    if current_user.get("role") not in {"admin", "super_admin"}:
+        require_project_membership(
+            project_object_id,
+            current_user,
+            project_members_collection,
+        )
 
 
 @router.get("/my-dashboard")
@@ -159,12 +198,7 @@ def report_project_summary(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if current_user.get("role") not in {"admin", "super_admin"}:
-        require_project_membership(
-            project_object_id,
-            current_user,
-            project_members_collection,
-        )
+    _require_project_report_access(project_object_id, current_user)
 
     tickets = list(ticket_collection.find({"project_id": str(project_object_id)}))
     by_status = {}
@@ -182,6 +216,36 @@ def report_project_summary(
         open_tickets += _is_open_ticket(ticket)
         overdue_tickets += _is_overdue_ticket(ticket, now)
 
+    backlog_tickets = [ticket for ticket in tickets if not ticket.get("sprint_id")]
+    active_sprint = sprints_collection.find_one(
+        {"project_id": project_object_id, "status": "active"}
+    )
+    active_sprint_summary = None
+    if active_sprint:
+        active_sprint_id = str(active_sprint["_id"])
+        active_tickets = [
+            ticket
+            for ticket in tickets
+            if str(ticket.get("sprint_id")) == active_sprint_id
+        ]
+        active_completed = [
+            ticket for ticket in active_tickets if not _is_open_ticket(ticket)
+        ]
+        active_sprint_summary = {
+            "sprint_id": active_sprint_id,
+            "name": active_sprint.get("name"),
+            "start_date": active_sprint.get("start_date"),
+            "end_date": active_sprint.get("end_date"),
+            "total_tickets": len(active_tickets),
+            "completed_tickets": len(active_completed),
+            "committed_story_points": sum(
+                _story_points(ticket) for ticket in active_tickets
+            ),
+            "completed_story_points": sum(
+                _story_points(ticket) for ticket in active_completed
+            ),
+        }
+
     return {
         "project": {
             "project_id": str(project_object_id),
@@ -195,17 +259,107 @@ def report_project_summary(
         "overdue_tickets": overdue_tickets,
         "by_status": by_status,
         "by_priority": by_priority,
+        "agile": {
+            "backlog_tickets": len(backlog_tickets),
+            "backlog_story_points": sum(
+                _story_points(ticket) for ticket in backlog_tickets
+            ),
+            "active_sprint": active_sprint_summary,
+        },
+    }
+
+
+@router.get("/projects/{project_id}/velocity")
+def report_project_velocity(
+    project_id: str,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100, description="Most recent completed sprints to include"),
+    ] = 10,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return completed story points per sprint for a project."""
+    project_object_id = parse_object_id(project_id, "project_id")
+    project = projects_collection.find_one({"_id": project_object_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _require_project_report_access(project_object_id, current_user)
+
+    completed_sprints = list(
+        sprints_collection.find(
+            {"project_id": project_object_id, "status": "completed"}
+        )
+    )
+    completed_sprints.sort(key=_sprint_recency, reverse=True)
+    completed_sprints = list(reversed(completed_sprints[:limit]))
+
+    series = []
+    for sprint in completed_sprints:
+        metrics = sprint.get("metrics") or {}
+        committed_points = int(metrics.get("committed_story_points") or 0)
+        completed_points = int(metrics.get("completed_story_points") or 0)
+        completion_rate = (
+            round(completed_points / committed_points * 100, 2)
+            if committed_points
+            else 0.0
+        )
+        series.append(
+            {
+                "sprint_id": str(sprint["_id"]),
+                "name": sprint.get("name"),
+                "start_date": sprint.get("start_date"),
+                "end_date": sprint.get("end_date"),
+                "completed_at": sprint.get("completed_at"),
+                "committed_tickets": int(metrics.get("committed_tickets") or 0),
+                "completed_tickets": int(metrics.get("completed_tickets") or 0),
+                "committed_story_points": committed_points,
+                "completed_story_points": completed_points,
+                "velocity": completed_points,
+                "completion_rate": completion_rate,
+            }
+        )
+
+    velocities = [sprint["velocity"] for sprint in series]
+    latest_velocity = velocities[-1] if velocities else 0
+    previous_velocity = velocities[-2] if len(velocities) > 1 else None
+    velocity_delta = (
+        latest_velocity - previous_velocity if previous_velocity is not None else None
+    )
+    if velocity_delta is None or velocity_delta == 0:
+        trend = "flat"
+    elif velocity_delta > 0:
+        trend = "up"
+    else:
+        trend = "down"
+
+    return {
+        "project": {
+            "project_id": str(project_object_id),
+            "code": project.get("code"),
+            "name": project.get("name"),
+        },
+        "completed_sprints": len(series),
+        "average_velocity": (
+            round(sum(velocities) / len(velocities), 2) if velocities else 0.0
+        ),
+        "latest_velocity": latest_velocity,
+        "velocity_delta": velocity_delta,
+        "trend": trend,
+        "sprints": series,
     }
 
 
 @router.get("/agent-tickets", tags=["Reports"])
-def report_agent_tickets(current_user: dict = Depends(get_current_user)):
+def report_agent_tickets(current_user: dict = Depends(_require_admin)):
     """
     Report ticket counts per agent (open vs resolved).
     Only super_admin and admin can access this.
     """
-    if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(status_code=403, detail="Only admins can access reports")
+    ensure_role(
+        current_user,
+        ADMIN_ROLES,
+        detail="Only admins can access reports",
+    )
 
     pipeline = [
         {"$match": {"assigned_agent": {"$ne": None}}},
@@ -268,13 +422,16 @@ def report_agent_tickets(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/overdue-tickets", tags=["Reports"])
-def report_overdue_tickets(current_user: dict = Depends(get_current_user)):
+def report_overdue_tickets(current_user: dict = Depends(_require_admin)):
     """
     Report count of overdue tickets.
     Only super_admin and admin can access this.
     """
-    if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(status_code=403, detail="Only admins can access reports")
+    ensure_role(
+        current_user,
+        ADMIN_ROLES,
+        detail="Only admins can access reports",
+    )
 
     now = datetime.now(timezone.utc)
 
@@ -342,13 +499,16 @@ def report_overdue_tickets(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/avg-resolution-time", tags=["Reports"])
-def report_avg_resolution_time(current_user: dict = Depends(get_current_user)):
+def report_avg_resolution_time(current_user: dict = Depends(_require_admin)):
     """
     Report average resolution time (from creation to resolved_date).
     Only super_admin and admin can access this.
     """
-    if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(status_code=403, detail="Only admins can access reports")
+    ensure_role(
+        current_user,
+        ADMIN_ROLES,
+        detail="Only admins can access reports",
+    )
 
     pipeline = [
         {

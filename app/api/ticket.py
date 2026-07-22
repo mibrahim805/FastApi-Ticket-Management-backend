@@ -28,6 +28,7 @@ from app.db.db import (
     notifications_collection,
     project_members_collection,
     projects_collection,
+    sprints_collection,
     statuses_collection,
     ticket_collection,
     transitions_collection,
@@ -74,6 +75,10 @@ def _serialize_ticket(ticket: dict) -> dict:
     serialized.setdefault("epic_id", None)
     serialized.setdefault("labels", [])
     serialized.setdefault("watchers", [])
+    serialized.setdefault("sprint_id", None)
+    serialized.setdefault("story_points", None)
+    serialized.setdefault("backlog_position", None)
+    serialized.setdefault("board_position", 0)
     return serialized
 
 
@@ -130,6 +135,18 @@ def _get_ticket_project(ticket: dict) -> tuple[ObjectId, dict]:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project_object_id, project
+
+
+def _next_ticket_position(query: dict, field: str) -> int:
+    existing_tickets = list(ticket_collection.find(query))
+    positions = [
+        item.get(field)
+        for item in existing_tickets
+        if isinstance(item.get(field), int)
+        and not isinstance(item.get(field), bool)
+        and item.get(field) >= 0
+    ]
+    return max(max(positions, default=-1) + 1, len(existing_tickets))
 
 
 def _outgoing_transitions(project: dict, current_status_id: str) -> list[dict]:
@@ -235,6 +252,14 @@ def _apply_ticket_transition(
         "closed_date": ((ticket.get("closed_date") or now) if is_terminal else None),
         "resolved_date": (
             (ticket.get("resolved_date") or now) if is_terminal or is_resolved else None
+        ),
+        "board_position": _next_ticket_position(
+            {
+                "project_id": str(project["_id"]),
+                "sprint_id": ticket.get("sprint_id"),
+                "current_status_id": target_status_id,
+            },
+            "board_position",
         ),
     }
     update_result = ticket_collection.update_one(
@@ -440,6 +465,20 @@ def create_ticket(
         "epic_id": epic_id,
         "labels": list(payload.labels),
         "watchers": [],
+        "sprint_id": None,
+        "story_points": payload.story_points,
+        "backlog_position": _next_ticket_position(
+            {"project_id": str(project["_id"]), "sprint_id": None},
+            "backlog_position",
+        ),
+        "board_position": _next_ticket_position(
+            {
+                "project_id": str(project["_id"]),
+                "sprint_id": None,
+                "current_status_id": str(first_status_id),
+            },
+            "board_position",
+        ),
         "priority": payload.priority.value,
         "current_status_id": first_status_id,
         "current_status_name": first_status["name"],
@@ -807,6 +846,16 @@ def update_ticket(
     update_data = data.model_dump(exclude_none=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No ticket fields supplied")
+
+    if "story_points" in update_data and ticket.get("sprint_id"):
+        sprint = sprints_collection.find_one(
+            {"_id": _parse_object_id(ticket["sprint_id"], "sprint_id")}
+        )
+        if sprint and sprint.get("status") == "completed":
+            raise HTTPException(
+                status_code=409,
+                detail="Completed sprint tickets and estimates are locked",
+            )
 
     changes = [
         {

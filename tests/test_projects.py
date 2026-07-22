@@ -43,6 +43,9 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     transition_calls = []
     notification_preference_calls = []
     saved_filter_calls = []
+    rate_limit_calls = []
+    sprint_calls = []
+    ticket_calls = []
 
     class RecordingCollection:
         def __init__(self, calls):
@@ -75,6 +78,21 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
         database,
         "saved_filters_collection",
         RecordingCollection(saved_filter_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "rate_limits_collection",
+        RecordingCollection(rate_limit_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "sprints_collection",
+        RecordingCollection(sprint_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "ticket_collection",
+        RecordingCollection(ticket_calls),
     )
 
     database.ensure_database_indexes()
@@ -137,6 +155,51 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
                 "unique": True,
             },
         )
+    ]
+    assert rate_limit_calls == [
+        (
+            [("expires_at", 1)],
+            {
+                "name": "rate_limits_expiry_ttl",
+                "expireAfterSeconds": 0,
+            },
+        )
+    ]
+    assert sprint_calls == [
+        (
+            [("project_id", 1), ("name_key", 1)],
+            {
+                "name": "sprints_project_name_unique",
+                "unique": True,
+            },
+        ),
+        (
+            [("project_id", 1), ("status", 1)],
+            {
+                "name": "sprints_one_active_per_project",
+                "unique": True,
+                "partialFilterExpression": {"status": "active"},
+            },
+        ),
+    ]
+    assert ticket_calls == [
+        (
+            [
+                ("project_id", 1),
+                ("sprint_id", 1),
+                ("current_status_id", 1),
+                ("board_position", 1),
+            ],
+            {"name": "tickets_sprint_status_position"},
+        ),
+        (
+            [
+                ("project_id", 1),
+                ("sprint_id", 1),
+                ("backlog_position", 1),
+            ],
+            {"name": "tickets_project_backlog_position"},
+        ),
     ]
 
 

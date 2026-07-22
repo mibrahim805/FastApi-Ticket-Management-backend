@@ -10,6 +10,7 @@ from app.api import (
     project,
     registration,
     reports,
+    sprint,
     status,
     ticket,
     ticket_attachment,
@@ -36,4 +37,5 @@ app.include_router(status.router)
 app.include_router(activity.router)
 app.include_router(notifications.router)
 app.include_router(reports.router)
+app.include_router(sprint.router)
 app.include_router(ticket_attachment.router)

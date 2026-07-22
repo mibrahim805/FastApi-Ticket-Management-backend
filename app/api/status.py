@@ -3,11 +3,20 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.auth import get_current_user
+from app.api.permissions import (
+    SUPER_ADMIN_ROLES,
+    ensure_role,
+    require_role,
+)
 from app.db.db import projects_collection, statuses_collection
 from app.models.status import StatusCreate, StatusUpdate
 
 router = APIRouter(prefix="/statuses", tags=["Statuses"])
+
+_require_super_admin = require_role(
+    *SUPER_ADMIN_ROLES,
+    detail="Only super_admin can manage statuses",
+)
 
 DEFAULT_WORKFLOW_STATUSES = [
     {"name": "To Do", "order": 10},
@@ -36,12 +45,13 @@ def _serialize_status(status: dict) -> dict:
 @router.post("/")
 def create_status(
     payload: StatusCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="Only super_admin can create statuses"
-        )
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can manage statuses",
+    )
 
     if statuses_collection.find_one({"name": payload.name}):
         raise HTTPException(
@@ -66,12 +76,13 @@ def create_status(
 
 @router.post("/default-workflow")
 def create_default_workflow_statuses(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="Only super_admin can create statuses"
-        )
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can manage statuses",
+    )
 
     existing_statuses = list(statuses_collection.find())
     existing_by_name = {
@@ -119,12 +130,12 @@ def create_default_workflow_statuses(
 
 
 @router.get("/")
-def list_statuses(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Only super_admin can list statuses",
-        )
+def list_statuses(current_user: dict = Depends(_require_super_admin)):
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can manage statuses",
+    )
     statuses = list(statuses_collection.find().sort("order", 1))
     for s in statuses:
         s["_id"] = str(s["_id"])
@@ -135,12 +146,13 @@ def list_statuses(current_user: dict = Depends(get_current_user)):
 def update_status(
     status_id: str,
     payload: StatusUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="Only super_admin can update statuses"
-        )
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can manage statuses",
+    )
 
     status = statuses_collection.find_one({"_id": ObjectId(status_id)})
     if not status:
@@ -157,12 +169,13 @@ def update_status(
 @router.delete("/{status_id}")
 def delete_status(
     status_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403, detail="Only super_admin can delete statuses"
-        )
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can manage statuses",
+    )
 
     status = statuses_collection.find_one({"_id": ObjectId(status_id)})
     if not status:

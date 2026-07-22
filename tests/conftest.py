@@ -1,3 +1,4 @@
+import os
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
@@ -5,6 +6,12 @@ from typing import Any
 
 import pytest
 from bson import ObjectId
+
+os.environ.setdefault(
+    "SECRET_KEY",
+    "test-only-secret-key-that-is-longer-than-thirty-two-characters",
+)
+os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
 
 
 def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
@@ -161,7 +168,7 @@ class FakeCollection:
             if _matches(document, query):
                 if "$set" in update:
                     document.update(update["$set"])
-                elif "$inc" in update:
+                if "$inc" in update:
                     for key, value in update["$inc"].items():
                         document[key] = document.get(key, 0) + value
                 self.updated_documents.append((query, update))
@@ -170,9 +177,11 @@ class FakeCollection:
         if upsert:
             new_doc = deepcopy(query)
             new_doc.setdefault("_id", ObjectId())
+            if "$setOnInsert" in update:
+                new_doc.update(update["$setOnInsert"])
             if "$set" in update:
                 new_doc.update(update["$set"])
-            elif "$inc" in update:
+            if "$inc" in update:
                 for key, value in update["$inc"].items():
                     new_doc[key] = new_doc.get(key, 0) + value
             self.documents.append(new_doc)
@@ -202,6 +211,11 @@ def transitions(fake_collection):
 
 
 @pytest.fixture
+def sprints(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def ticket_activities(fake_collection):
     return fake_collection.__class__()
 
@@ -213,6 +227,11 @@ def notification_preferences(fake_collection):
 
 @pytest.fixture
 def saved_filters(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
+def rate_limits(fake_collection):
     return fake_collection.__class__()
 
 
@@ -243,6 +262,7 @@ def isolate_project_members_collection(monkeypatch, project_members):
         "app.api.comment",
         "app.api.notifications",
         "app.api.reports",
+        "app.api.sprint",
         "app.api.ticket",
         "app.api.ticket_attachment",
         "uploads.ticket_attachment",
@@ -288,6 +308,15 @@ def isolate_saved_filters_collection(monkeypatch, saved_filters):
 
 
 @pytest.fixture(autouse=True)
+def isolate_rate_limits_collection(monkeypatch, rate_limits):
+    module = sys.modules.get("app.api.rate_limit")
+    if module is not None:
+        monkeypatch.setattr(module, "rate_limits_collection", rate_limits)
+
+    return rate_limits
+
+
+@pytest.fixture(autouse=True)
 def isolate_issue_links_collection(monkeypatch, issue_links):
     for module_name in (
         "app.db.db",
@@ -312,6 +341,22 @@ def isolate_transitions_collection(monkeypatch, transitions):
             monkeypatch.setattr(module, "transitions_collection", transitions)
 
     return transitions
+
+
+@pytest.fixture(autouse=True)
+def isolate_sprints_collection(monkeypatch, sprints):
+    for module_name in (
+        "app.db.db",
+        "app.api.project",
+        "app.api.reports",
+        "app.api.sprint",
+        "app.api.ticket",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "sprints_collection"):
+            monkeypatch.setattr(module, "sprints_collection", sprints)
+
+    return sprints
 
 
 @pytest.fixture(autouse=True)

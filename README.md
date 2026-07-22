@@ -308,6 +308,36 @@ user can access; a super-admin can search every project.
 
 ---
 
+## Agile delivery (sprints)
+
+| Method | Endpoint |
+|---------|----------|
+| POST | /projects/{project_id}/sprints |
+| GET | /projects/{project_id}/sprints |
+| GET | /sprints/{sprint_id} |
+| PATCH | /sprints/{sprint_id} |
+| DELETE | /sprints/{sprint_id} |
+| POST | /sprints/{sprint_id}/start |
+| POST | /sprints/{sprint_id}/complete |
+| GET | /projects/{project_id}/backlog |
+| GET | /projects/{project_id}/board |
+| PATCH | /tickets/{ticket_id}/sprint |
+| PATCH | /tickets/{ticket_id}/story-points |
+| PATCH | /tickets/{ticket_id}/backlog-position |
+| PATCH | /tickets/{ticket_id}/board-position |
+
+Sprints follow `planned → active → completed`, with at most one active sprint
+per project. Project leads manage the lifecycle; leads and members can estimate,
+assign, and reorder tickets. A ticket with no `sprint_id` belongs to the ordered
+project backlog. `board_position` orders a ticket within its current status
+column without changing the project's workflow/status model.
+
+Starting a sprint snapshots its original commitment. Completing it records
+completed story points as immutable velocity history and moves incomplete work
+back to the backlog. Completed tickets remain linked to the completed sprint.
+
+---
+
 ## Saved filters
 
 | Method | Endpoint |
@@ -337,6 +367,7 @@ Saved filters belong to the authenticated user. Example request:
 |---------|----------|
 | GET | /reports/my-dashboard |
 | GET | /reports/projects/{project_id}/summary |
+| GET | /reports/projects/{project_id}/velocity |
 | GET | /reports/agent-tickets |
 | GET | /reports/overdue-tickets |
 | GET | /reports/avg-resolution-time |
@@ -347,8 +378,9 @@ issues only from projects they can access. Project summaries use dynamic status
 and priority buckets, so custom workflows are supported. Administrative aggregate
 reports remain restricted to admins and super-admins.
 
-Sprint and velocity reporting is intentionally deferred until the sprint model
-and ticket-to-sprint relationship from section 12 are implemented.
+Project summaries include backlog totals and the active sprint's progress.
+Velocity reports return the completed story-point series, average/latest
+velocity, and trend across the requested recent completed sprints.
 
 ---
 
@@ -417,6 +449,8 @@ statuses
 
 transitions
 
+sprints
+
 tickets
 
 comments
@@ -433,6 +467,8 @@ saved_filters
 Projects are stored in `projects`, memberships in `project_members`, and tickets
 reference their project using `project_id` and `project_key`. Named workflow
 transitions are stored separately in `transitions` and reference their project.
+Sprint lifecycle and velocity snapshots are stored in `sprints`; tickets store
+their optional `sprint_id`, `story_points`, backlog order, and board-column order.
 
 This is a breaking storage-schema change for databases created by earlier
 versions. Migrate existing collections and reference fields before deployment.
@@ -515,8 +551,8 @@ pip install -r requirements.txt
 
 Create a `.env` file.
 
-The application loads this file automatically at startup. Copy `.env.example`
-and replace its placeholder values:
+Configuration is validated with `pydantic-settings` at startup. Copy
+`.env.example` and replace its placeholder values:
 
 ```bash
 cp .env.example .env
@@ -524,15 +560,36 @@ cp .env.example .env
 
 ```env
 MONGO_URI=mongodb://localhost:27017
-
-DATABASE_NAME=ticket_management
-
-SECRET_KEY=your_secret_key
-
-ALGORITHM=HS256
-
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+MONGO_DB_NAME=mydatabase
+SECRET_KEY=replace-with-a-random-value-of-at-least-32-characters
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=60
+PASSWORD_RESET_EXPIRE_MINUTES=15
 ```
+
+`SECRET_KEY` and `MONGO_URI` are required. Generate a suitable local JWT key
+with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+If `git ls-files .env` prints `.env`, the file was committed before the ignore
+rule was added. Remove it from Git tracking before adding real secrets (the
+local file is kept):
+
+```bash
+git rm --cached .env
+```
+
+Rotate any secret that was already committed, because adding an ignore rule
+does not remove it from Git history.
+
+Public registration, login, and password-reset endpoints use Mongo-backed
+fixed-window rate limits. Their defaults are in `.env.example`; counters are
+automatically removed through a MongoDB TTL index. Leave
+`TRUST_PROXY_HEADERS=false` unless the application is behind a trusted reverse
+proxy that replaces incoming forwarding headers.
 
 ---
 

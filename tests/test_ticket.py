@@ -101,9 +101,14 @@ def test_create_ticket_assigns_first_status_and_updates_counter(
     assert response["current_status_id"] == str(status_id)
     assert response["issue_type"] == expected_issue_type
     assert response["labels"] == []
+    assert response["sprint_id"] is None
+    assert response["story_points"] is None
+    assert response["backlog_position"] == 0
+    assert response["board_position"] == 0
     assert response["due_date"] == "due-date"
     assert tickets.documents[0]["issue_type"] == expected_issue_type
     assert tickets.documents[0]["labels"] == []
+    assert tickets.documents[0]["sprint_id"] is None
     assert len(tickets.documents) == 1
     assert len(notifications.documents) == 1
 

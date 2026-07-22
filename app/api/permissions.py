@@ -2,10 +2,13 @@ from collections.abc import Collection
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
+from app.api.auth import get_current_user
 from app.models.project_member import ProjectRole
 
+SUPER_ADMIN_ROLES = frozenset({"super_admin"})
+ADMIN_ROLES = frozenset({"admin", "super_admin"})
 PROJECT_MEMBER_ROLES = frozenset(role.value for role in ProjectRole)
 PROJECT_WORK_ROLES = frozenset(
     {
@@ -14,6 +17,35 @@ PROJECT_WORK_ROLES = frozenset(
     }
 )
 PROJECT_LEAD_ROLES = frozenset({ProjectRole.LEAD.value})
+
+
+def ensure_role(
+    current_user: dict | None,
+    allowed_roles: Collection[str],
+    *,
+    detail: str = "You do not have permission to perform this action",
+) -> dict:
+    """Validate a global application role for direct/internal function calls."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    if current_user.get("role") not in allowed_roles:
+        raise HTTPException(status_code=403, detail=detail)
+    return current_user
+
+
+def require_role(
+    *allowed_roles: str,
+    detail: str = "You do not have permission to perform this action",
+):
+    """Build a FastAPI dependency that permits only the supplied global roles."""
+    roles = frozenset(allowed_roles)
+    if not roles:
+        raise ValueError("At least one role is required")
+
+    def dependency(current_user: dict = Depends(get_current_user)) -> dict:
+        return ensure_role(current_user, roles, detail=detail)
+
+    return dependency
 
 
 def parse_object_id(value: str | ObjectId, field_name: str) -> ObjectId:

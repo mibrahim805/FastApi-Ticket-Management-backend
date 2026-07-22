@@ -22,7 +22,6 @@ idna==3.18
 iniconfig==2.3.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
-motor==3.7.1
 mypy_extensions==1.1.0
 nodeenv==1.10.0
 openpyxl==3.1.5
@@ -35,6 +34,7 @@ pre_commit==4.6.0
 pyasn1==0.6.3
 pycparser==3.0
 pydantic==2.13.4
+pydantic-settings>=2,<3
 pydantic_core==2.46.4
 Pygments==2.20.0
 pymongo==4.17.0
