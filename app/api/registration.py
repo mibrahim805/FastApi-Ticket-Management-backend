@@ -10,6 +10,17 @@ from app.api.auth import (
     verify_password,
     verify_password_reset_token,
 )
+from app.api.permissions import (
+    ADMIN_ROLES,
+    SUPER_ADMIN_ROLES,
+    ensure_role,
+    require_role,
+)
+from app.api.rate_limit import (
+    login_rate_limit,
+    password_reset_rate_limit,
+    registration_rate_limit,
+)
 from app.db.db import reset_tokens_collection, user_collection
 from app.models.registration import (
     Role,
@@ -21,8 +32,21 @@ from app.models.registration import (
 
 router = APIRouter(tags=["Auth"])
 
+_require_super_admin = require_role(
+    *SUPER_ADMIN_ROLES,
+    detail="Only super admin can register an admin or agent",
+)
+_require_admin = require_role(
+    *ADMIN_ROLES,
+    detail="Only super admin or admin can activate or deactivate users",
+)
 
-@router.post("/register_super_admin", tags=["Auth"])
+
+@router.post(
+    "/register_super_admin",
+    tags=["Auth"],
+    dependencies=[Depends(registration_rate_limit)],
+)
 def register_super_admin(user: SuperAminRegister):
     existing_admin = user_collection.find_one({"role": "super_admin"})
     if existing_admin:
@@ -40,7 +64,11 @@ def register_super_admin(user: SuperAminRegister):
     return {"message": "Super admin registered successfully"}
 
 
-@router.post("/register", tags=["Auth"])
+@router.post(
+    "/register",
+    tags=["Auth"],
+    dependencies=[Depends(registration_rate_limit)],
+)
 def register(user: UserRegister):
     existing_email = user_collection.find_one({"email": user.email})
     allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
@@ -73,13 +101,14 @@ def register(user: UserRegister):
 
 @router.post("/register_admin_or_agent", tags=["Auth"])
 def register_admin_or_agent(
-    user: UserRegister, current_user: dict = Depends(get_current_user)
+    user: UserRegister,
+    current_user: dict = Depends(_require_super_admin),
 ):
-    if current_user["role"] != "super_admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Only super admin can register an admin or agent",
-        )
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super admin can register an admin or agent",
+    )
 
     existing_email = user_collection.find_one({"email": user.email})
     allowed_roles = {Role.ADMIN.value, Role.AGENT.value}
@@ -106,7 +135,11 @@ def register_admin_or_agent(
     return {"message": f"{user.role.capitalize()} registered successfully"}
 
 
-@router.post("/login", tags=["Auth"])
+@router.post(
+    "/login",
+    tags=["Auth"],
+    dependencies=[Depends(login_rate_limit)],
+)
 def login(user: UserLogin):
     db_user = user_collection.find_one({"email": user.email})
     if not db_user:
@@ -124,13 +157,14 @@ def login(user: UserLogin):
 
 @router.put("/activate_or_deactivate/{user_id}", tags=["Auth"])
 def activate_or_deactivate(
-    user_id: str, current_user: dict = Depends(get_current_user)
+    user_id: str,
+    current_user: dict = Depends(_require_admin),
 ):
-    if current_user["role"] not in ["super_admin", "admin"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Only super admin or admin can activate or deactivate users",
-        )
+    ensure_role(
+        current_user,
+        ADMIN_ROLES,
+        detail="Only super admin or admin can activate or deactivate users",
+    )
     user = user_collection.find_one(ObjectId(user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -184,25 +218,27 @@ def change_password(
     return {"message": "Password changed successfully"}
 
 
-@router.post("/request-password-reset")
+@router.post(
+    "/request-password-reset",
+    dependencies=[Depends(password_reset_rate_limit)],
+)
 def request_password_reset(email: str):
     user = user_collection.find_one({"email": email})
 
     if not user:
         return {"message": "If the email exists, a reset link has been sent"}
 
-    token = create_password_reset_token(
+    create_password_reset_token(
         reset_tokens_collection=reset_tokens_collection, user=user
     )
-
-    reset_link = f"http://localhost:8000/reset-password?token={token}"
-
-    print("RESET LINK:", reset_link)
 
     return {"message": "If the email exists, a reset link has been sent"}
 
 
-@router.post("/reset-password")
+@router.post(
+    "/reset-password",
+    dependencies=[Depends(password_reset_rate_limit)],
+)
 def reset_password(token: str, new_password: str):
     record = verify_password_reset_token(reset_tokens_collection, token)
 

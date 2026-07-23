@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 
 from pymongo import ASCENDING, MongoClient
 
-client = MongoClient("mongodb://localhost:27017")
+from app.config import get_settings
 
+settings = get_settings()
+client = MongoClient(settings.mongo_uri)
 
-db = client["mydatabase"]
+db = client[settings.mongo_db_name]
 
 
 user_collection = db["users"]
@@ -13,6 +15,9 @@ projects_collection = db["projects"]
 ticket_collection = db["tickets"]
 comments_collection = db["comments"]
 notifications_collection = db["notifications"]
+notification_preferences_collection = db["notification_preferences"]
+saved_filters_collection = db["saved_filters"]
+rate_limits_collection = db["rate_limits"]
 reset_tokens_collection = db["reset_tokens"]
 statuses_collection = db["statuses"]
 attachment_collection = db["attachments"]
@@ -21,6 +26,7 @@ counters_collection = db["counters"]
 project_members_collection = db["project_members"]
 issue_links_collection = db["issue_links"]
 transitions_collection = db["transitions"]
+sprints_collection = db["sprints"]
 
 
 PROJECT_CODE_UNIQUE_INDEX = "projects_code_unique"
@@ -30,6 +36,13 @@ ISSUE_LINK_FROM_TICKET_INDEX = "issue_links_from_ticket"
 ISSUE_LINK_TO_TICKET_INDEX = "issue_links_to_ticket"
 TRANSITION_PROJECT_NAME_INDEX = "transitions_project_name"
 TRANSITION_PROJECT_SOURCE_INDEX = "transitions_project_source"
+NOTIFICATION_PREFERENCE_UNIQUE_INDEX = "notification_preferences_user_project_unique"
+SAVED_FILTER_USER_NAME_INDEX = "saved_filters_user_name_unique"
+RATE_LIMIT_EXPIRY_INDEX = "rate_limits_expiry_ttl"
+SPRINT_PROJECT_NAME_INDEX = "sprints_project_name_unique"
+SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
+TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
+TICKET_BACKLOG_ORDER_INDEX = "tickets_project_backlog_position"
 
 
 def ensure_database_indexes() -> None:
@@ -64,6 +77,49 @@ def ensure_database_indexes() -> None:
     transitions_collection.create_index(
         [("project_id", ASCENDING), ("from_status_ids", ASCENDING)],
         name=TRANSITION_PROJECT_SOURCE_INDEX,
+    )
+    notification_preferences_collection.create_index(
+        [("user_id", ASCENDING), ("project_id", ASCENDING)],
+        name=NOTIFICATION_PREFERENCE_UNIQUE_INDEX,
+        unique=True,
+    )
+    saved_filters_collection.create_index(
+        [("user_id", ASCENDING), ("name_key", ASCENDING)],
+        name=SAVED_FILTER_USER_NAME_INDEX,
+        unique=True,
+    )
+    rate_limits_collection.create_index(
+        [("expires_at", ASCENDING)],
+        name=RATE_LIMIT_EXPIRY_INDEX,
+        expireAfterSeconds=0,
+    )
+    sprints_collection.create_index(
+        [("project_id", ASCENDING), ("name_key", ASCENDING)],
+        name=SPRINT_PROJECT_NAME_INDEX,
+        unique=True,
+    )
+    sprints_collection.create_index(
+        [("project_id", ASCENDING), ("status", ASCENDING)],
+        name=SPRINT_ACTIVE_PROJECT_INDEX,
+        unique=True,
+        partialFilterExpression={"status": "active"},
+    )
+    ticket_collection.create_index(
+        [
+            ("project_id", ASCENDING),
+            ("sprint_id", ASCENDING),
+            ("current_status_id", ASCENDING),
+            ("board_position", ASCENDING),
+        ],
+        name=TICKET_SPRINT_BOARD_INDEX,
+    )
+    ticket_collection.create_index(
+        [
+            ("project_id", ASCENDING),
+            ("sprint_id", ASCENDING),
+            ("backlog_position", ASCENDING),
+        ],
+        name=TICKET_BACKLOG_ORDER_INDEX,
     )
 
 

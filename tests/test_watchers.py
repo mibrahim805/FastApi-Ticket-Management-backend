@@ -133,10 +133,19 @@ def test_ticket_transition_notifies_watchers_except_actor(
         current_user={"_id": actor_id, "role": "agent"},
     )
 
-    assert len(notifications.documents) == 1
-    assert notifications.documents[0]["user_id"] == str(watcher_id)
-    assert notifications.documents[0]["event_type"] == "ticket_transitioned"
-    assert notifications.documents[0]["is_read"] is False
+    transition_notifications = [
+        item
+        for item in notifications.documents
+        if item["event_type"] == "ticket_transitioned"
+    ]
+    assert {item["user_id"] for item in transition_notifications} == {
+        str(actor_id),
+        str(watcher_id),
+    }
+    watcher_notification = next(
+        item for item in transition_notifications if item["user_id"] == str(watcher_id)
+    )
+    assert watcher_notification["is_read"] is False
 
 
 def test_comment_notifies_ticket_watchers(

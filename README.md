@@ -129,8 +129,13 @@ Users can:
 
 - Add Comment
 - View Comments
+- Reply in threads
+- Edit or delete their own comments
+- Mention project participants with `@username`
 
-Comments are stored separately from tickets.
+Comments are stored separately from tickets. Reporter-visible comments remain
+public-only; internal comments and their mention notifications are restricted to
+participants who can view them.
 
 ---
 
@@ -288,11 +293,94 @@ Authorization: Bearer <your_token>
 |---------|----------|
 | POST | /tickets |
 | GET | /tickets |
+| GET | /tickets/search |
+| GET | /tickets/{project_key} |
 | GET | /tickets/{id} |
 | PUT | /tickets/{id} |
 | DELETE | /tickets/{id} |
 | GET | /tickets/{ticket_id}/transitions |
 | POST | /{ticket_id}/transitions/{transition_id} |
+
+Board and global ticket search support status, priority, category, issue type,
+labels, epic, assignee, overdue, and sorting filters. Text search matches ticket
+number, title, and description. Global search returns only projects the current
+user can access; a super-admin can search every project.
+
+---
+
+## Agile delivery (sprints)
+
+| Method | Endpoint |
+|---------|----------|
+| POST | /projects/{project_id}/sprints |
+| GET | /projects/{project_id}/sprints |
+| GET | /sprints/{sprint_id} |
+| PATCH | /sprints/{sprint_id} |
+| DELETE | /sprints/{sprint_id} |
+| POST | /sprints/{sprint_id}/start |
+| POST | /sprints/{sprint_id}/complete |
+| GET | /projects/{project_id}/backlog |
+| GET | /projects/{project_id}/board |
+| PATCH | /tickets/{ticket_id}/sprint |
+| PATCH | /tickets/{ticket_id}/story-points |
+| PATCH | /tickets/{ticket_id}/backlog-position |
+| PATCH | /tickets/{ticket_id}/board-position |
+
+Sprints follow `planned → active → completed`, with at most one active sprint
+per project. Project leads manage the lifecycle; leads and members can estimate,
+assign, and reorder tickets. A ticket with no `sprint_id` belongs to the ordered
+project backlog. `board_position` orders a ticket within its current status
+column without changing the project's workflow/status model.
+
+Starting a sprint snapshots its original commitment. Completing it records
+completed story points as immutable velocity history and moves incomplete work
+back to the backlog. Completed tickets remain linked to the completed sprint.
+
+---
+
+## Saved filters
+
+| Method | Endpoint |
+|---------|----------|
+| GET | /filters |
+| POST | /filters |
+| DELETE | /filters/{filter_id} |
+
+Saved filters belong to the authenticated user. Example request:
+
+```json
+{
+  "name": "Urgent backend work",
+  "query_params": {
+    "scope": "global",
+    "priority": "urgent",
+    "labels": ["backend"]
+  }
+}
+```
+
+---
+
+## Reporting and dashboards
+
+| Method | Endpoint |
+|---------|----------|
+| GET | /reports/my-dashboard |
+| GET | /reports/projects/{project_id}/summary |
+| GET | /reports/projects/{project_id}/velocity |
+| GET | /reports/agent-tickets |
+| GET | /reports/overdue-tickets |
+| GET | /reports/avg-resolution-time |
+| GET | /tickets_summary?project_id={project_id} |
+
+The personal dashboard returns the current user's active created and assigned
+issues only from projects they can access. Project summaries use dynamic status
+and priority buckets, so custom workflows are supported. Administrative aggregate
+reports remain restricted to admins and super-admins.
+
+Project summaries include backlog totals and the active sprint's progress.
+Velocity reports return the completed story-point series, average/latest
+velocity, and trend across the requested recent completed sprints.
 
 ---
 
@@ -300,8 +388,28 @@ Authorization: Bearer <your_token>
 
 | Method | Endpoint |
 |---------|----------|
-| POST | /comments |
-| GET | /comments/{ticket_id} |
+| POST | /tickets/{ticket_id}/comments |
+| GET | /tickets/{ticket_id}/comments |
+| POST | /comments/{comment_id}/replies |
+| PATCH | /comments/{comment_id} |
+| DELETE | /comments/{comment_id} |
+
+Pass `threaded=true` to the ticket comment listing endpoint to nest replies under
+their parent comments.
+
+---
+
+## Attachments
+
+| Method | Endpoint |
+|---------|----------|
+| POST | /tickets/{ticket_id}/attachments |
+| GET | /tickets/{ticket_id}/attachments |
+| GET | /attachments/{attachment_id} |
+| DELETE | /attachments/{attachment_id} |
+
+All attachment operations require access to the owning ticket. Only the uploader,
+a project lead, or a super admin can delete an attachment.
 
 ---
 
@@ -310,7 +418,21 @@ Authorization: Bearer <your_token>
 | Method | Endpoint |
 |---------|----------|
 | GET | /notifications |
-| PUT | /notifications/{id}/read |
+| GET | /notifications/{notification_id} |
+| PUT | /notifications/{notification_id}/read |
+| PUT | /notifications/mark-all-read |
+| GET | /notifications/preferences/{project_id} |
+| PUT | /notifications/preferences/{project_id} |
+
+Notification delivery is enabled by default. A project member can disable all
+notifications for one project or opt out of specific event types:
+
+```json
+{
+  "enabled": true,
+  "disabled_event_types": ["ticket_transitioned", "comment_created"]
+}
+```
 
 ---
 
@@ -327,19 +449,59 @@ statuses
 
 transitions
 
+sprints
+
 tickets
 
 comments
 
+attachments
+
 notifications
+
+notification_preferences
+
+saved_filters
 ```
 
 Projects are stored in `projects`, memberships in `project_members`, and tickets
 reference their project using `project_id` and `project_key`. Named workflow
 transitions are stored separately in `transitions` and reference their project.
+Sprint lifecycle and velocity snapshots are stored in `sprints`; tickets store
+their optional `sprint_id`, `story_points`, backlog order, and board-column order.
 
 This is a breaking storage-schema change for databases created by earlier
 versions. Migrate existing collections and reference fields before deployment.
+
+## Attachment storage
+
+Development uses local storage by default:
+
+```env
+ATTACHMENT_STORAGE_BACKEND=local
+ATTACHMENT_LOCAL_DIR=uploads/tickets
+```
+
+Production can use AWS S3 or another S3-compatible service through the same API:
+
+```env
+ATTACHMENT_STORAGE_BACKEND=s3
+ATTACHMENT_S3_BUCKET=ticket-attachments
+ATTACHMENT_S3_PREFIX=production
+ATTACHMENT_S3_REGION=us-east-1
+ATTACHMENT_S3_ENDPOINT_URL=https://s3.example.com
+ATTACHMENT_S3_ADDRESSING_STYLE=path
+ATTACHMENT_S3_SSE=AES256
+```
+
+`ATTACHMENT_S3_ENDPOINT_URL`, `ATTACHMENT_S3_PREFIX`, and `ATTACHMENT_S3_SSE` are
+optional. Boto3 uses its normal credential provider chain, so production should
+prefer workload or instance credentials; `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` can be used for local S3-compatible services.
+
+Attachment metadata records its storage backend and object key. Migrate existing
+local objects and metadata before changing a deployed environment from `local` to
+`s3`.
 
 ---
 
@@ -389,17 +551,45 @@ pip install -r requirements.txt
 
 Create a `.env` file.
 
+Configuration is validated with `pydantic-settings` at startup. Copy
+`.env.example` and replace its placeholder values:
+
+```bash
+cp .env.example .env
+```
+
 ```env
 MONGO_URI=mongodb://localhost:27017
-
-DATABASE_NAME=ticket_management
-
-SECRET_KEY=your_secret_key
-
-ALGORITHM=HS256
-
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+MONGO_DB_NAME=mydatabase
+SECRET_KEY=replace-with-a-random-value-of-at-least-32-characters
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=60
+PASSWORD_RESET_EXPIRE_MINUTES=15
 ```
+
+`SECRET_KEY` and `MONGO_URI` are required. Generate a suitable local JWT key
+with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+If `git ls-files .env` prints `.env`, the file was committed before the ignore
+rule was added. Remove it from Git tracking before adding real secrets (the
+local file is kept):
+
+```bash
+git rm --cached .env
+```
+
+Rotate any secret that was already committed, because adding an ignore rule
+does not remove it from Git history.
+
+Public registration, login, and password-reset endpoints use Mongo-backed
+fixed-window rate limits. Their defaults are in `.env.example`; counters are
+automatically removed through a MongoDB TTL index. Leave
+`TRUST_PROXY_HEADERS=false` unless the application is behind a trusted reverse
+proxy that replaces incoming forwarding headers.
 
 ---
 

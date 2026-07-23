@@ -10,12 +10,12 @@ from pymongo.errors import DuplicateKeyError
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
+from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     PROJECT_LEAD_ROLES,
-    PROJECT_MEMBER_ROLES,
     PROJECT_WORK_ROLES,
+    get_accessible_project_ids,
     get_project_membership,
-    parse_object_id,
     require_project_membership,
     require_ticket_membership,
 )
@@ -24,15 +24,16 @@ from app.db.db import (
     comments_collection,
     counters_collection,
     issue_links_collection,
+    notification_preferences_collection,
     notifications_collection,
     project_members_collection,
     projects_collection,
+    sprints_collection,
     statuses_collection,
     ticket_collection,
     transitions_collection,
     user_collection,
 )
-from app.models.notifications import Notifications
 from app.models.project_member import ProjectRole
 from app.models.ticket import (
     AssignAgent,
@@ -74,6 +75,10 @@ def _serialize_ticket(ticket: dict) -> dict:
     serialized.setdefault("epic_id", None)
     serialized.setdefault("labels", [])
     serialized.setdefault("watchers", [])
+    serialized.setdefault("sprint_id", None)
+    serialized.setdefault("story_points", None)
+    serialized.setdefault("backlog_position", None)
+    serialized.setdefault("board_position", 0)
     return serialized
 
 
@@ -130,6 +135,18 @@ def _get_ticket_project(ticket: dict) -> tuple[ObjectId, dict]:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project_object_id, project
+
+
+def _next_ticket_position(query: dict, field: str) -> int:
+    existing_tickets = list(ticket_collection.find(query))
+    positions = [
+        item.get(field)
+        for item in existing_tickets
+        if isinstance(item.get(field), int)
+        and not isinstance(item.get(field), bool)
+        and item.get(field) >= 0
+    ]
+    return max(max(positions, default=-1) + 1, len(existing_tickets))
 
 
 def _outgoing_transitions(project: dict, current_status_id: str) -> list[dict]:
@@ -236,6 +253,14 @@ def _apply_ticket_transition(
         "resolved_date": (
             (ticket.get("resolved_date") or now) if is_terminal or is_resolved else None
         ),
+        "board_position": _next_ticket_position(
+            {
+                "project_id": str(project["_id"]),
+                "sprint_id": ticket.get("sprint_id"),
+                "current_status_id": target_status_id,
+            },
+            "board_position",
+        ),
     }
     update_result = ticket_collection.update_one(
         {
@@ -249,12 +274,22 @@ def _apply_ticket_transition(
             status_code=409,
             detail="Ticket status changed before the transition could be applied",
         )
+    create_notification(
+        project_id=ticket.get("project_id"),
+        ticket_id=ticket_object_id,
+        user_id=current_user["_id"],
+        actor_id=current_user["_id"],
+        event_type="ticket_transitioned",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
+    )
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=str(ticket_object_id),
         event_type="ticket_transitioned",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     log_activity(
         ticket_id=str(ticket_object_id),
@@ -430,6 +465,20 @@ def create_ticket(
         "epic_id": epic_id,
         "labels": list(payload.labels),
         "watchers": [],
+        "sprint_id": None,
+        "story_points": payload.story_points,
+        "backlog_position": _next_ticket_position(
+            {"project_id": str(project["_id"]), "sprint_id": None},
+            "backlog_position",
+        ),
+        "board_position": _next_ticket_position(
+            {
+                "project_id": str(project["_id"]),
+                "sprint_id": None,
+                "current_status_id": str(first_status_id),
+            },
+            "board_position",
+        ),
         "priority": payload.priority.value,
         "current_status_id": first_status_id,
         "current_status_name": first_status["name"],
@@ -449,13 +498,17 @@ def create_ticket(
         changed_by=current_user["_id"],
     )
 
-    notification = Notifications(
+    notification_record = create_notification(
+        project_id=ticket["project_id"],
         ticket_id=ticket["_id"],
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_created",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notification_record = notifications_collection.insert_one(notification.model_dump())
-    ticket["notification_id"] = str(notification_record.inserted_id)
+    if notification_record is not None:
+        ticket["notification_id"] = str(notification_record.inserted_id)
 
     return _serialize_ticket(ticket)
 
@@ -735,6 +788,7 @@ def create_ticket_link(
         event_type="ticket_linked",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     notify_ticket_watchers(
         ticket=to_ticket,
@@ -742,6 +796,7 @@ def create_ticket_link(
         event_type="ticket_linked",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     return _serialize_issue_link(link)
 
@@ -792,6 +847,16 @@ def update_ticket(
     if not update_data:
         raise HTTPException(status_code=400, detail="No ticket fields supplied")
 
+    if "story_points" in update_data and ticket.get("sprint_id"):
+        sprint = sprints_collection.find_one(
+            {"_id": _parse_object_id(ticket["sprint_id"], "sprint_id")}
+        )
+        if sprint and sprint.get("status") == "completed":
+            raise HTTPException(
+                status_code=409,
+                detail="Completed sprint tickets and estimates are locked",
+            )
+
     changes = [
         {
             "field": field,
@@ -807,19 +872,22 @@ def update_ticket(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_updated",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-
-    notifications_collection.insert_one(notification.model_dump())
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=ticket_id,
         event_type="ticket_updated",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     if changes:
         log_activity(
@@ -902,18 +970,22 @@ def assign_ticket(
         ],
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_assigned",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notifications_collection.insert_one(notification.model_dump())
     notify_ticket_watchers(
         ticket=ticket,
         ticket_id=ticket_id,
         event_type="ticket_assigned",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
 
     return {"message": "Ticket assigned successfully"}
@@ -980,6 +1052,221 @@ def bulk_transition_tickets(
     }
 
 
+def _build_ticket_list_query(
+    *,
+    project_ids: List[str],
+    status: Optional[str],
+    priority: Optional[str],
+    category: Optional[str],
+    issue_type: Optional[IssueType],
+    labels: Optional[List[str]],
+    epic_id: Optional[str],
+    assigned_agent: Optional[str],
+    search: Optional[str],
+    overdue_only: Optional[bool],
+) -> dict:
+    if len(project_ids) == 1:
+        query = {"project_id": project_ids[0]}
+    else:
+        query = {"project_id": {"$in": project_ids}}
+
+    if status:
+        query["status"] = status.lower()
+    if priority:
+        query["priority"] = priority.lower()
+    if category:
+        query["category"] = category
+    if issue_type:
+        if issue_type == IssueType.TASK:
+            query["issue_type"] = {"$in": [IssueType.TASK.value, None]}
+        else:
+            query["issue_type"] = issue_type.value
+    if labels:
+        query["labels"] = {"$all": list(dict.fromkeys(labels))}
+    if epic_id:
+        query["epic_id"] = str(_parse_object_id(epic_id, "epic_id"))
+    if assigned_agent:
+        query["assigned_agent"] = assigned_agent
+    if overdue_only:
+        query["$expr"] = {
+            "$and": [
+                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
+                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
+            ]
+        }
+    if search:
+        search_regex = re.compile(re.escape(search), re.IGNORECASE)
+        query["$or"] = [
+            {"title": {"$regex": search_regex}},
+            {"ticket_code": {"$regex": search_regex}},
+            {"description": {"$regex": search_regex}},
+        ]
+    return query
+
+
+def _paginate_ticket_query(
+    *,
+    query: dict,
+    page: int,
+    page_size: int,
+    sort_by: Optional[str],
+    sort_order: Optional[str],
+) -> tuple[list[dict], dict]:
+    sort_field_map = {
+        "created_at": "created_date",
+        "priority": "priority",
+        "due_date": "due_date",
+    }
+    mongo_sort_field = sort_field_map.get(sort_by, "created_date")
+    mongo_sort_dir = 1 if sort_order == "asc" else -1
+    total_count = ticket_collection.count_documents(query)
+    cursor = (
+        ticket_collection.find(query)
+        .sort(mongo_sort_field, mongo_sort_dir)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    tickets = []
+    now = datetime.now(timezone.utc)
+    for ticket in cursor:
+        if ticket.get("due_date") and ticket.get("current_status_name") not in [
+            "resolved",
+            "closed",
+        ]:
+            ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
+        else:
+            ticket["is_overdue"] = False
+        tickets.append(_serialize_ticket(ticket))
+
+    total_pages = (total_count + page_size - 1) // page_size
+    return tickets, {
+        "total": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": page > 1,
+    }
+
+
+def _ticket_filters_applied(
+    *,
+    status: Optional[str],
+    priority: Optional[str],
+    category: Optional[str],
+    issue_type: Optional[IssueType],
+    labels: Optional[List[str]],
+    epic_id: Optional[str],
+    assigned_agent: Optional[str],
+    search: Optional[str],
+    overdue_only: Optional[bool],
+    sort_by: Optional[str],
+    sort_order: Optional[str],
+) -> dict:
+    return {
+        "status": status,
+        "priority": priority,
+        "category": category,
+        "issue_type": issue_type.value if issue_type else None,
+        "labels": labels,
+        "epic_id": epic_id,
+        "assigned_agent": assigned_agent,
+        "search": search,
+        "overdue_only": overdue_only,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+    }
+
+
+@router.get("/tickets/search", tags=["Tickets"])
+def search_tickets(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Results per page"),
+    status: Optional[str] = Query(
+        None, description="Filter by status (e.g. open, closed, pending)"
+    ),
+    priority: Optional[str] = Query(
+        None, description="Filter by priority (e.g. low, medium, high)"
+    ),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    issue_type: Annotated[
+        Optional[IssueType],
+        Query(description="Filter by issue type"),
+    ] = None,
+    labels: Annotated[
+        Optional[List[str]],
+        Query(description="Filter by all supplied labels; repeat for multiple labels"),
+    ] = None,
+    epic_id: Annotated[
+        Optional[str],
+        Query(description="Filter by parent epic ID"),
+    ] = None,
+    assigned_agent: Optional[str] = Query(
+        None, description="Filter by assigned agent ID"
+    ),
+    search: Optional[str] = Query(
+        None,
+        max_length=200,
+        description="Search across title, ticket number, and description",
+    ),
+    overdue_only: Optional[bool] = Query(
+        None, description="Filter to show only overdue tickets"
+    ),
+    sort_by: Optional[str] = Query(
+        "created_at",
+        pattern="^(created_at|priority|due_date)$",
+        description="Sort field",
+    ),
+    sort_order: Optional[str] = Query(
+        "desc", pattern="^(asc|desc)$", description="Sort direction"
+    ),
+    current_user: dict = Depends(get_current_user),
+):
+    project_ids = get_accessible_project_ids(
+        current_user,
+        project_members_collection,
+        projects_collection,
+    )
+    query = _build_ticket_list_query(
+        project_ids=project_ids,
+        status=status,
+        priority=priority,
+        category=category,
+        issue_type=issue_type,
+        labels=labels,
+        epic_id=epic_id,
+        assigned_agent=assigned_agent,
+        search=search,
+        overdue_only=overdue_only,
+    )
+    tickets, pagination = _paginate_ticket_query(
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    return {
+        "data": tickets,
+        "pagination": pagination,
+        "scope": "all_accessible_projects",
+        "filters_applied": _ticket_filters_applied(
+            status=status,
+            priority=priority,
+            category=category,
+            issue_type=issue_type,
+            labels=labels,
+            epic_id=epic_id,
+            assigned_agent=assigned_agent,
+            search=search,
+            overdue_only=overdue_only,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        ),
+    }
+
+
 @router.get("/tickets/{project_key}", tags=["Tickets"])
 def get_tickets(
     project_key: str,
@@ -1000,10 +1287,18 @@ def get_tickets(
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
     ] = None,
+    epic_id: Annotated[
+        Optional[str],
+        Query(description="Filter by parent epic ID"),
+    ] = None,
     assigned_agent: Optional[str] = Query(
         None, description="Filter by assigned agent ID"
     ),
-    search: Optional[str] = Query(None, description="Search by title or ticket number"),
+    search: Optional[str] = Query(
+        None,
+        max_length=200,
+        description="Search across title, ticket number, and description",
+    ),
     overdue_only: Optional[bool] = Query(
         None, description="Filter to show only overdue tickets"
     ),
@@ -1017,7 +1312,6 @@ def get_tickets(
     ),
     current_user: dict = Depends(get_current_user),
 ):
-    query = {}
     project = projects_collection.find_one({"code": project_key})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1027,112 +1321,70 @@ def get_tickets(
         current_user,
         project_members_collection,
     )
-
-    query["project_id"] = str(project["_id"])
-    if status:
-        query["status"] = status.lower()
-    if priority:
-        query["priority"] = priority.lower()
-    if category:
-        query["category"] = category
-    if issue_type:
-        if issue_type == IssueType.TASK:
-            query["issue_type"] = {"$in": [IssueType.TASK.value, None]}
-        else:
-            query["issue_type"] = issue_type.value
-    if labels:
-        query["labels"] = {"$all": labels}
-    if assigned_agent:
-        query["assigned_agent"] = assigned_agent
-
-    if overdue_only:
-        query["$expr"] = {
-            "$and": [
-                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
-                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
-            ]
-        }
-
-    if search:
-        search_regex = re.compile(re.escape(search), re.IGNORECASE)
-        search_query = [
-            {"title": {"$regex": search_regex}},
-            {"ticket_code": {"$regex": search_regex}},
-        ]
-        if "$or" in query:
-            query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_query}]
-        else:
-            query["$or"] = search_query
-
-    SORT_FIELD_MAP = {
-        "created_at": "created_date",
-        "priority": "priority",
-        "due_date": "due_date",
-    }
-    mongo_sort_field = SORT_FIELD_MAP.get(sort_by, "created_date")
-    mongo_sort_dir = 1 if sort_order == "asc" else -1
-
-    skip = (page - 1) * page_size
-    limit = page_size
-
-    total_count = ticket_collection.count_documents(query)
-    cursor = (
-        ticket_collection.find(query)
-        .sort(mongo_sort_field, mongo_sort_dir)
-        .skip(skip)
-        .limit(limit)
+    query = _build_ticket_list_query(
+        project_ids=[str(project["_id"])],
+        status=status,
+        priority=priority,
+        category=category,
+        issue_type=issue_type,
+        labels=labels,
+        epic_id=epic_id,
+        assigned_agent=assigned_agent,
+        search=search,
+        overdue_only=overdue_only,
     )
-
-    tickets = []
-    now = datetime.now(timezone.utc)
-    for ticket in cursor:
-        if ticket.get("due_date") and ticket.get("current_status_name") not in [
-            "resolved",
-            "closed",
-        ]:
-            ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
-        else:
-            ticket["is_overdue"] = False
-        tickets.append(_serialize_ticket(ticket))
-
-    total_pages = (total_count + page_size - 1) // page_size
-
+    tickets, pagination = _paginate_ticket_query(
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
     return {
         "data": tickets,
-        "pagination": {
-            "total": total_count,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_prev": page > 1,
-        },
-        "filters_applied": {
-            "status": status,
-            "priority": priority,
-            "category": category,
-            "issue_type": issue_type.value if issue_type else None,
-            "labels": labels,
-            "assigned_agent": assigned_agent,
-            "search": search,
-            "sort_by": sort_by,
-            "sort_order": sort_order,
-        },
+        "pagination": pagination,
+        "filters_applied": _ticket_filters_applied(
+            status=status,
+            priority=priority,
+            category=category,
+            issue_type=issue_type,
+            labels=labels,
+            epic_id=epic_id,
+            assigned_agent=assigned_agent,
+            search=search,
+            overdue_only=overdue_only,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        ),
     }
 
 
 @router.get("/tickets_summary", tags=["Tickets"])
-def get_tickets_summary(current_user: dict = Depends(get_current_user)):
-    user_id = parse_object_id(current_user.get("_id"), "user_id")
-    memberships = list(project_members_collection.find({"user_id": user_id}))
-    project_ids = list(
-        {
-            str(membership["project_id"])
-            for membership in memberships
-            if membership.get("project_id")
-            and membership.get("role") in PROJECT_MEMBER_ROLES
-        }
-    )
+def get_tickets_summary(
+    project_id: Annotated[
+        Optional[str],
+        Query(description="Limit the summary to one accessible project"),
+    ] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    if project_id is not None:
+        project_object_id = _parse_object_id(project_id, "project_id")
+        project = projects_collection.find_one({"_id": project_object_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        require_project_membership(
+            project_object_id,
+            current_user,
+            project_members_collection,
+            allow_super_admin=True,
+        )
+        project_ids = [str(project_object_id)]
+    else:
+        project_ids = get_accessible_project_ids(
+            current_user,
+            project_members_collection,
+            projects_collection,
+        )
     if not project_ids:
         return {}
 
@@ -1225,6 +1477,7 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         event_type="ticket_deleted",
         actor_id=current_user["_id"],
         notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
     log_activity(
         ticket_id=ticket_id,
@@ -1248,11 +1501,14 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         }
     )
 
-    notification = Notifications(
+    create_notification(
+        project_id=ticket.get("project_id"),
         ticket_id=ticket_id,
         user_id=str(current_user["_id"]),
+        actor_id=current_user["_id"],
         event_type="ticket_deleted",
+        notifications_collection=notifications_collection,
+        preferences_collection=notification_preferences_collection,
     )
-    notifications_collection.insert_one(notification.model_dump())
 
     return {"message": "Ticket deleted successfully"}

@@ -2,10 +2,13 @@ from collections.abc import Collection
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
+from app.api.auth import get_current_user
 from app.models.project_member import ProjectRole
 
+SUPER_ADMIN_ROLES = frozenset({"super_admin"})
+ADMIN_ROLES = frozenset({"admin", "super_admin"})
 PROJECT_MEMBER_ROLES = frozenset(role.value for role in ProjectRole)
 PROJECT_WORK_ROLES = frozenset(
     {
@@ -14,6 +17,35 @@ PROJECT_WORK_ROLES = frozenset(
     }
 )
 PROJECT_LEAD_ROLES = frozenset({ProjectRole.LEAD.value})
+
+
+def ensure_role(
+    current_user: dict | None,
+    allowed_roles: Collection[str],
+    *,
+    detail: str = "You do not have permission to perform this action",
+) -> dict:
+    """Validate a global application role for direct/internal function calls."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+    if current_user.get("role") not in allowed_roles:
+        raise HTTPException(status_code=403, detail=detail)
+    return current_user
+
+
+def require_role(
+    *allowed_roles: str,
+    detail: str = "You do not have permission to perform this action",
+):
+    """Build a FastAPI dependency that permits only the supplied global roles."""
+    roles = frozenset(allowed_roles)
+    if not roles:
+        raise ValueError("At least one role is required")
+
+    def dependency(current_user: dict = Depends(get_current_user)) -> dict:
+        return ensure_role(current_user, roles, detail=detail)
+
+    return dependency
 
 
 def parse_object_id(value: str | ObjectId, field_name: str) -> ObjectId:
@@ -36,6 +68,27 @@ def get_project_membership(
             "project_id": parse_object_id(project_id, "project_id"),
             "user_id": parse_object_id(user_id, "user_id"),
         }
+    )
+
+
+def get_accessible_project_ids(
+    current_user: dict,
+    project_members_collection,
+    projects_collection,
+) -> list[str]:
+    """Return canonical project IDs the current user is allowed to browse."""
+    if current_user.get("role") == "super_admin":
+        return [str(project["_id"]) for project in projects_collection.find({})]
+
+    user_id = parse_object_id(current_user.get("_id"), "user_id")
+    memberships = project_members_collection.find({"user_id": user_id})
+    return list(
+        dict.fromkeys(
+            str(membership["project_id"])
+            for membership in memberships
+            if membership.get("project_id")
+            and membership.get("role") in PROJECT_MEMBER_ROLES
+        )
     )
 
 
@@ -103,4 +156,50 @@ def require_ticket_membership(
         project_members_collection,
         allowed_roles=allowed_roles,
         role_detail=role_detail,
+    )
+
+
+def require_ticket_participant(
+    ticket: dict,
+    current_user: dict,
+    project_members_collection,
+) -> dict:
+    """Require project membership, with support for legacy ticket participants.
+
+    New assignments are restricted to project members. The participant fallbacks
+    keep older tickets usable when their creator or assignee predates project
+    memberships, and retain the original super-admin override.
+    """
+    try:
+        return require_ticket_membership(
+            ticket,
+            current_user,
+            project_members_collection,
+        )
+    except HTTPException as error:
+        is_missing_membership = (
+            error.status_code == 403
+            and error.detail == "You are not a member of this project"
+        )
+        if not is_missing_membership:
+            raise
+
+    user_id = current_user.get("_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authenticated user is missing an ID",
+        )
+
+    user_id = str(user_id)
+    if user_id == str(ticket.get("assigned_agent")):
+        return {"role": ProjectRole.MEMBER.value, "source": "ticket_assignment"}
+    if user_id == str(ticket.get("userId")):
+        return {"role": ProjectRole.REPORTER.value, "source": "ticket_creator"}
+    if current_user.get("role") == "super_admin":
+        return {"role": "super_admin", "source": "global_role"}
+
+    raise HTTPException(
+        status_code=403,
+        detail="You do not have permission to access this ticket",
     )

@@ -8,18 +8,21 @@ from app.api.auth import get_current_user
 from app.api.permissions import (
     PROJECT_LEAD_ROLES,
     PROJECT_MEMBER_ROLES,
+    SUPER_ADMIN_ROLES,
+    ensure_role,
     parse_object_id,
     require_project_membership,
+    require_role,
 )
 from app.db.db import (
     project_members_collection,
     projects_collection,
+    sprints_collection,
     statuses_collection,
     ticket_collection,
     transitions_collection,
     user_collection,
 )
-from app.decorator.super_admin import super_admin_required
 from app.models.project import (
     ProjectCreate,
     ProjectMemberRole,
@@ -30,6 +33,11 @@ from app.models.project_member import ProjectMemberCreate
 from app.models.transition import ProjectWorkflowUpdate
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
+
+_require_super_admin = require_role(
+    *SUPER_ADMIN_ROLES,
+    detail="Only super_admin can perform this action",
+)
 
 
 def _get_project_or_404(project_id: str) -> tuple:
@@ -83,11 +91,15 @@ def _require_project_admin(project_id, current_user: dict) -> dict:
 
 
 @router.post("")
-@super_admin_required
 def create_project(
     project: ProjectCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can perform this action",
+    )
     current_user_id = parse_object_id(current_user.get("_id"), "user_id")
     _ensure_project_key_available(project.code)
 
@@ -290,15 +302,20 @@ def update_project(
 
 
 @router.delete("/{project_id}")
-@super_admin_required
 def delete_project(
     project_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_super_admin),
 ):
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super_admin can perform this action",
+    )
     project_object_id, _ = _get_project_or_404(project_id)
     projects_collection.delete_one({"_id": project_object_id})
     project_members_collection.delete_many({"project_id": project_object_id})
     transitions_collection.delete_many({"project_id": project_object_id})
+    sprints_collection.delete_many({"project_id": project_object_id})
     return {"message": "Project deleted"}
 
 
