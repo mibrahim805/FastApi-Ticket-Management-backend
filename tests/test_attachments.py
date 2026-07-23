@@ -10,6 +10,7 @@ from starlette.datastructures import Headers, UploadFile
 from app.api import ticket_attachment
 from app.main import app
 from app.storage.attachments import (
+    AttachmentStorageError,
     S3AttachmentStorage,
     StorageObjectNotFound,
     attachment_storage_from_environment,
@@ -69,6 +70,47 @@ def _attachment(ticket_id, uploader_id, content, **overrides):
         "checksum_sha256": hashlib.sha256(content).hexdigest(),
         **overrides,
     }
+
+
+def _allow_upload(monkeypatch, ticket_id, user_id):
+    ticket = {
+        "_id": ticket_id,
+        "ticket_code": "FILE-1",
+        "assigned_agent": str(user_id),
+    }
+    monkeypatch.setattr(
+        ticket_attachment,
+        "_get_ticket_or_404",
+        lambda _ticket_id: (str(ticket_id), ticket),
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "require_ticket_participant",
+        lambda *_args: {"role": "member"},
+    )
+
+
+def _allow_attachment_access(monkeypatch, attachment, storage):
+    monkeypatch.setattr(
+        ticket_attachment,
+        "_get_attachment_or_404",
+        lambda _attachment_id: (attachment["_id"], attachment),
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "_get_ticket_or_404",
+        lambda _ticket_id: (str(attachment["ticket_id"]), {}),
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "require_ticket_participant",
+        lambda *_args: {"role": "member"},
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "_storage_for_attachment",
+        lambda _attachment: storage,
+    )
 
 
 def test_attachment_upload_writes_ticket_activity(
@@ -399,6 +441,293 @@ def test_uploader_can_delete_attachment_and_storage_object(
     assert attachments.documents == []
     assert attachment["storage_key"] not in storage.objects
     assert ticket_activities.documents[-1]["action"] == "attachment_deleted"
+
+
+def test_attachment_storage_cache_reuses_backend(monkeypatch, tmp_path):
+    storage = MemoryAttachmentStorage()
+    factory_calls = []
+
+    def storage_factory(*, local_root):
+        factory_calls.append(local_root)
+        return storage
+
+    monkeypatch.setenv("ATTACHMENT_S3_PREFIX", "initial")
+    monkeypatch.setattr(ticket_attachment, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(ticket_attachment, "_storage_cache", None)
+    monkeypatch.setattr(ticket_attachment, "_storage_cache_signature", None)
+    monkeypatch.setattr(
+        ticket_attachment,
+        "attachment_storage_from_environment",
+        storage_factory,
+    )
+
+    assert ticket_attachment.get_attachment_storage() is storage
+    assert ticket_attachment.get_attachment_storage() is storage
+    assert factory_calls == [tmp_path]
+
+    monkeypatch.setenv("ATTACHMENT_S3_PREFIX", "changed")
+    assert ticket_attachment.get_attachment_storage() is storage
+    assert factory_calls == [tmp_path, tmp_path]
+
+
+def test_configured_storage_converts_storage_error_to_http_503(monkeypatch):
+    def fail_to_configure_storage():
+        raise AttachmentStorageError("Storage is unavailable")
+
+    monkeypatch.setattr(
+        ticket_attachment,
+        "get_attachment_storage",
+        fail_to_configure_storage,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment._configured_storage()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Storage is unavailable"
+
+
+@pytest.mark.parametrize(
+    ("collection_name", "lookup", "expected_detail"),
+    [
+        ("ticket_collection", ticket_attachment._get_ticket_or_404, "Ticket not found"),
+        (
+            "attachment_collection",
+            ticket_attachment._get_attachment_or_404,
+            "Attachment not found",
+        ),
+    ],
+)
+def test_attachment_lookup_helpers_return_404_for_missing_records(
+    monkeypatch,
+    fake_collection,
+    collection_name,
+    lookup,
+    expected_detail,
+):
+    monkeypatch.setattr(ticket_attachment, collection_name, fake_collection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        lookup(str(ObjectId()))
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == expected_detail
+
+
+def test_attachment_storage_key_supports_legacy_metadata_and_rejects_missing_key():
+    assert (
+        ticket_attachment._attachment_storage_key({"stored_name": "legacy.txt"})
+        == "legacy.txt"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment._attachment_storage_key({})
+
+    assert exc_info.value.status_code == 500
+    assert "storage key" in exc_info.value.detail
+
+
+def test_storage_for_attachment_rejects_backend_mismatch(monkeypatch):
+    monkeypatch.setattr(
+        ticket_attachment,
+        "get_attachment_storage",
+        lambda: MemoryAttachmentStorage(name="local"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment._storage_for_attachment({"storage_backend": "s3"})
+
+    assert exc_info.value.status_code == 503
+    assert "'s3'" in exc_info.value.detail
+    assert "'local'" in exc_info.value.detail
+
+
+@pytest.mark.parametrize("filename", [None, "README"])
+def test_safe_original_name_requires_a_filename_and_extension(filename):
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment._safe_original_name(filename)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "File must have a name and extension"
+
+
+def test_store_attachment_converts_storage_error_to_http_503(monkeypatch):
+    storage = MemoryAttachmentStorage()
+
+    def fail_to_store(_key, _content, _content_type):
+        raise AttachmentStorageError("Object storage write failed")
+
+    monkeypatch.setattr(storage, "store", fail_to_store)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment._store_attachment(
+            storage,
+            "ticket/file.txt",
+            b"content",
+            "text/plain",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Object storage write failed"
+
+
+def test_upload_rejects_unsupported_extension(monkeypatch):
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    _allow_upload(monkeypatch, ticket_id, user_id)
+    upload = UploadFile(filename="malware.exe", file=BytesIO(b"content"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ticket_attachment.upload_attachment(
+                str(ticket_id),
+                upload,
+                current_user={"_id": user_id, "role": "agent"},
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Unsupported file type"
+
+
+def test_upload_rejects_file_over_size_limit(monkeypatch):
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    _allow_upload(monkeypatch, ticket_id, user_id)
+    monkeypatch.setattr(ticket_attachment, "MAX_FILE_SIZE", 3)
+    upload = UploadFile(filename="notes.txt", file=BytesIO(b"four"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ticket_attachment.upload_attachment(
+                str(ticket_id),
+                upload,
+                current_user={"_id": user_id, "role": "agent"},
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "File size exceeds 10 MB"
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_upload_rolls_back_storage_and_preserves_insert_error(
+    monkeypatch,
+    rollback_fails,
+):
+    class FailingAttachmentCollection:
+        @staticmethod
+        def insert_one(_document):
+            raise RuntimeError("Database insert failed")
+
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    storage = MemoryAttachmentStorage()
+    _allow_upload(monkeypatch, ticket_id, user_id)
+    monkeypatch.setattr(
+        ticket_attachment,
+        "attachment_collection",
+        FailingAttachmentCollection(),
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "get_attachment_storage",
+        lambda: storage,
+    )
+    if rollback_fails:
+
+        def fail_to_delete(key):
+            storage.deleted_keys.append(key)
+            raise AttachmentStorageError("Rollback failed")
+
+        monkeypatch.setattr(storage, "delete", fail_to_delete)
+
+    upload = UploadFile(filename="notes.txt", file=BytesIO(b"content"))
+
+    with pytest.raises(RuntimeError, match="Database insert failed"):
+        asyncio.run(
+            ticket_attachment.upload_attachment(
+                str(ticket_id),
+                upload,
+                current_user={"_id": user_id, "role": "agent"},
+            )
+        )
+
+    assert len(storage.deleted_keys) == 1
+    assert bool(storage.objects) is rollback_fails
+
+
+@pytest.mark.parametrize(
+    ("storage_error", "expected_status"),
+    [
+        (StorageObjectNotFound("Attachment object was not found"), 404),
+        (AttachmentStorageError("Object storage is unavailable"), 503),
+    ],
+)
+def test_download_converts_storage_errors_to_http_errors(
+    monkeypatch,
+    storage_error,
+    expected_status,
+):
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    attachment = _attachment(ticket_id, user_id, b"content")
+    storage = MemoryAttachmentStorage()
+
+    def fail_to_read(_key):
+        raise storage_error
+
+    monkeypatch.setattr(storage, "read", fail_to_read)
+    _allow_attachment_access(monkeypatch, attachment, storage)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment.download_attachment(
+            str(attachment["_id"]),
+            current_user={"_id": user_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.detail == str(storage_error)
+
+
+def test_download_rejects_checksum_mismatch(monkeypatch):
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    attachment = _attachment(ticket_id, user_id, b"expected content")
+    storage = MemoryAttachmentStorage()
+    storage.objects[attachment["storage_key"]] = b"tampered content"
+    _allow_attachment_access(monkeypatch, attachment, storage)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment.download_attachment(
+            str(attachment["_id"]),
+            current_user={"_id": user_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Attachment failed its integrity check"
+
+
+def test_delete_converts_storage_error_to_http_503(monkeypatch):
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    attachment = _attachment(ticket_id, user_id, b"content")
+    storage = MemoryAttachmentStorage()
+
+    def fail_to_delete(_key):
+        raise AttachmentStorageError("Object storage delete failed")
+
+    monkeypatch.setattr(storage, "delete", fail_to_delete)
+    _allow_attachment_access(monkeypatch, attachment, storage)
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment.delete_attachment(
+            str(attachment["_id"]),
+            current_user={"_id": user_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Object storage delete failed"
 
 
 def test_s3_storage_uses_compatible_client_api():
