@@ -221,6 +221,14 @@ class TestOverdueFilter:
                     "current_status_name": "open",
                     "userId": "user1",
                 },
+                {
+                    "_id": ObjectId(),
+                    "project_id": str(project_id),
+                    "project_key": "TEST",
+                    "due_date": past_date,
+                    "current_status_name": "resolved",
+                    "userId": "user1",
+                },
             ]
         )
 
@@ -244,6 +252,7 @@ class TestOverdueFilter:
         # Check that overdue flag is set correctly
         assert response_tickets[0]["is_overdue"] is True  # Past date
         assert response_tickets[1]["is_overdue"] is False  # Future date
+        assert response_tickets[2]["is_overdue"] is False  # Resolved ticket
 
 
 class TestStatuses:

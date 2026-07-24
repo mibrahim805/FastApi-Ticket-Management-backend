@@ -38,6 +38,13 @@ class MemoryAttachmentStorage:
         self.objects.pop(key, None)
 
 
+def test_fake_storage_read_raises_on_missing_key():
+    """Exercises the StorageObjectNotFound branch in MemoryAttachmentStorage.read."""
+    storage = MemoryAttachmentStorage()
+    with pytest.raises(StorageObjectNotFound):
+        storage.read("non-existent-key")
+
+
 def _ticket(project_id, ticket_id, **overrides):
     return {
         "_id": ticket_id,
