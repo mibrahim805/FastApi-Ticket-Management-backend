@@ -13,11 +13,13 @@ from app.api.auth import get_current_user
 from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     Capability,
+    can_assign_ticket,
     get_accessible_project_ids,
     get_project_membership,
     has_capability,
     require_project_membership,
     require_ticket_membership,
+    transition_guard_error,
 )
 from app.api.watcher_notifications import notify_ticket_watchers
 from app.db.db import (
@@ -34,7 +36,6 @@ from app.db.db import (
     transitions_collection,
     user_collection,
 )
-from app.models.project_member import ProjectRole
 from app.models.ticket import (
     AssignAgent,
     BulkAssignRequest,
@@ -163,19 +164,7 @@ def _transition_guard_error(
     ticket: dict,
     membership: dict,
 ) -> tuple[int, str] | None:
-    guard = transition.get("guard", {})
-    allowed_roles = {
-        role.value if isinstance(role, ProjectRole) else role
-        for role in guard.get(
-            "allowed_roles",
-            [ProjectRole.LEAD.value, ProjectRole.MEMBER.value],
-        )
-    }
-    if membership.get("role") not in allowed_roles:
-        return 403, "Your project role cannot use this transition"
-    if guard.get("requires_assignee") and not ticket.get("assigned_agent"):
-        return 400, "Ticket must be assigned before using this transition"
-    return None
+    return transition_guard_error(transition, ticket, membership)
 
 
 def _apply_ticket_transition(
@@ -936,14 +925,12 @@ def assign_ticket(
             detail="Target user must be a lead or member of this project",
         )
 
-    current_user_id = str(current_user["_id"])
-    is_lead = actor_membership.get("role") == ProjectRole.LEAD.value
-    is_self_assign = current_user_id == str(agent_object_id)
-    is_reassigning_another_member = ticket.get("assigned_agent") not in (
-        None,
-        current_user_id,
-    )
-    if not is_lead and (not is_self_assign or is_reassigning_another_member):
+    if not can_assign_ticket(
+        ticket,
+        current_user,
+        actor_membership,
+        agent_object_id,
+    ):
         raise HTTPException(
             status_code=403,
             detail="Project members can only self-assign unassigned tickets",

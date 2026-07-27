@@ -21,8 +21,8 @@ from starlette.concurrency import run_in_threadpool
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import (
-    Capability,
-    has_capability,
+    can_delete_attachment,
+    can_upload_attachment,
     parse_object_id,
     require_ticket_participant,
 )
@@ -113,14 +113,7 @@ def _require_attachment_upload_permission(
     current_user: dict,
     membership: dict,
 ) -> None:
-    user_id = str(current_user.get("_id"))
-    can_upload = (
-        user_id == str(ticket.get("userId"))
-        or user_id == str(ticket.get("assigned_agent"))
-        or has_capability(membership, Capability.UPLOAD_ATTACHMENTS)
-        or current_user.get("role") == "super_admin"
-    )
-    if not can_upload:
+    if not can_upload_attachment(ticket, current_user, membership):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -349,10 +342,7 @@ def delete_attachment(
         project_members_collection,
     )
 
-    is_uploader = str(attachment.get("uploaded_by")) == str(current_user.get("_id"))
-    is_project_lead = has_capability(membership, Capability.DELETE_ATTACHMENTS)
-    is_super_admin = current_user.get("role") == "super_admin"
-    if not (is_uploader or is_project_lead or is_super_admin):
+    if not can_delete_attachment(attachment, current_user, membership):
         raise HTTPException(
             status_code=403,
             detail="Only the uploader or a project lead can delete this attachment",

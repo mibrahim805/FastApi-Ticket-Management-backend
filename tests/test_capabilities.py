@@ -2,8 +2,17 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.api import registration
-from app.api.permissions import Capability, has_capability, require_capability
+from app.api import project, registration
+from app.api.permissions import (
+    ROLE_CAPABILITIES,
+    Capability,
+    can_assign_ticket,
+    can_upload_attachment,
+    has_capability,
+    require_capability,
+    transition_guard_error,
+)
+from app.models.project import ProjectRolePermissionUpdate
 from app.models.registration import ChangeUserRole
 
 
@@ -22,10 +31,157 @@ def test_project_role_capability_matrix(role, capability, allowed):
     assert has_capability({"role": role}, capability) is allowed
 
 
+def test_project_override_can_revoke_a_default_capability():
+    membership = {
+        "role": "member",
+        "capability_revocations": [Capability.UPDATE_TICKET.value],
+    }
+    assert not has_capability(membership, Capability.UPDATE_TICKET)
+
+
 def test_super_admin_has_all_capabilities():
     assert all(
         has_capability({"role": "super_admin"}, capability) for capability in Capability
     )
+
+
+def test_attachment_policy_is_explicit_for_each_role():
+    assert Capability.UPLOAD_ATTACHMENTS in ROLE_CAPABILITIES["lead"]
+    assert Capability.UPLOAD_ATTACHMENTS not in ROLE_CAPABILITIES["member"]
+    assert Capability.UPLOAD_ATTACHMENTS not in ROLE_CAPABILITIES["reporter"]
+
+
+def test_reporter_attachment_upload_requires_ticket_actor_exception():
+    ticket = {"userId": "reporter", "assigned_agent": None}
+    reporter = {"_id": "reporter", "role": "customer"}
+    assert can_upload_attachment(ticket, reporter, {"role": "reporter"})
+    assert not can_upload_attachment(
+        ticket,
+        {"_id": "other", "role": "customer"},
+        {"role": "reporter"},
+    )
+
+
+def test_assignment_policy_centralizes_lead_and_member_rules():
+    ticket = {"assigned_agent": None}
+    assert can_assign_ticket(
+        ticket,
+        {"_id": "member"},
+        {"role": "member"},
+        "member",
+    )
+    assert not can_assign_ticket(
+        ticket,
+        {"_id": "member"},
+        {"role": "member"},
+        "other",
+    )
+    assert can_assign_ticket(
+        {"assigned_agent": "someone"},
+        {"_id": "lead"},
+        {"role": "lead"},
+        "other",
+    )
+
+
+def test_transition_role_guard_is_centralized():
+    transition = {"guard": {"allowed_roles": ["lead"]}}
+    assert transition_guard_error(transition, {}, {"role": "member"}) == (
+        403,
+        "Your project role cannot use this transition",
+    )
+    assert transition_guard_error(transition, {}, {"role": "lead"}) is None
+
+
+def test_project_can_grant_reporter_attachment_upload(
+    monkeypatch,
+    fake_collection,
+    project_members,
+):
+    project_a_id = ObjectId()
+    project_b_id = ObjectId()
+    lead_id = ObjectId()
+    reporter_id = ObjectId()
+    projects = fake_collection.__class__(
+        [
+            {"_id": project_a_id, "permission_overrides": {}},
+            {"_id": project_b_id, "permission_overrides": {}},
+        ]
+    )
+    monkeypatch.setattr(project, "projects_collection", projects)
+    for project_id in (project_a_id, project_b_id):
+        project_members.insert_one(
+            {"project_id": project_id, "user_id": lead_id, "role": "lead"}
+        )
+        project_members.insert_one(
+            {"project_id": project_id, "user_id": reporter_id, "role": "reporter"}
+        )
+
+    project.update_project_permissions(
+        str(project_b_id),
+        ProjectRolePermissionUpdate(
+            role="reporter",
+            grants={Capability.UPLOAD_ATTACHMENTS.value},
+        ),
+        current_user={"_id": lead_id, "role": "user"},
+    )
+
+    project_a_reporter = project_members.find_one(
+        {"project_id": project_a_id, "user_id": reporter_id}
+    )
+    project_b_reporter = project_members.find_one(
+        {"project_id": project_b_id, "user_id": reporter_id}
+    )
+    assert not has_capability(
+        project_a_reporter,
+        Capability.UPLOAD_ATTACHMENTS,
+    )
+    assert has_capability(
+        project_b_reporter,
+        Capability.UPLOAD_ATTACHMENTS,
+    )
+    unrelated_ticket = {"userId": "someone-else", "assigned_agent": None}
+    reporter = {"_id": reporter_id, "role": "customer"}
+    assert not can_upload_attachment(
+        unrelated_ticket,
+        reporter,
+        project_a_reporter,
+    )
+    assert can_upload_attachment(
+        unrelated_ticket,
+        reporter,
+        project_b_reporter,
+    )
+
+
+def test_project_permission_override_rejects_manage_project(
+    monkeypatch,
+    fake_collection,
+    project_members,
+):
+    project_id = ObjectId()
+    lead_id = ObjectId()
+    monkeypatch.setattr(
+        project,
+        "projects_collection",
+        fake_collection.__class__([{"_id": project_id, "permission_overrides": {}}]),
+    )
+    project_members.insert_one(
+        {"project_id": project_id, "user_id": lead_id, "role": "lead"}
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        project.update_project_permissions(
+            str(project_id),
+            ProjectRolePermissionUpdate(
+                role="reporter",
+                grants={Capability.MANAGE_PROJECT.value},
+            ),
+            current_user={"_id": lead_id, "role": "user"},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "manage_project cannot be overridden"
 
 
 def test_require_capability_rejects_missing_capability():

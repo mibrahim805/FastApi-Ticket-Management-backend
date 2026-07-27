@@ -11,13 +11,6 @@ from app.models.project_member import ProjectRole
 SUPER_ADMIN_ROLES = frozenset({"super_admin"})
 ADMIN_ROLES = frozenset({"admin", "super_admin"})
 PROJECT_MEMBER_ROLES = frozenset(role.value for role in ProjectRole)
-PROJECT_WORK_ROLES = frozenset(
-    {
-        ProjectRole.LEAD.value,
-        ProjectRole.MEMBER.value,
-    }
-)
-PROJECT_LEAD_ROLES = frozenset({ProjectRole.LEAD.value})
 
 
 class Capability(str, Enum):
@@ -35,6 +28,7 @@ class Capability(str, Enum):
     MANAGE_TICKET_WORK = "manage_ticket_work"
     TRANSITION_TICKETS = "transition_tickets"
     ASSIGN_TICKETS = "assign_tickets"
+    REASSIGN_TICKETS = "reassign_tickets"
     LINK_TICKETS = "link_tickets"
     MANAGE_SPRINTS = "manage_sprints"
     MANAGE_PROJECT = "manage_project"
@@ -49,7 +43,10 @@ class Capability(str, Enum):
     DELETE_ATTACHMENTS = "delete_attachments"
 
 
-_ROLE_CAPABILITIES = {
+# Public policy table: this is the source of truth for role-based access.
+# Contextual permissions (for example, ticket creator/assignee) are listed
+# separately below and must not be inferred from a project role.
+ROLE_CAPABILITIES = {
     ProjectRole.LEAD.value: frozenset(Capability),
     ProjectRole.MEMBER.value: frozenset(
         {
@@ -82,15 +79,117 @@ _ROLE_CAPABILITIES = {
     ),
 }
 
+# Attachment permissions intentionally have two layers:
+#
+#   role matrix: lead -> upload/delete, member/reporter -> neither
+#   ticket actor exception: creator or current assignee -> upload
+#
+# This makes the answer to "can a reporter upload?" explicit: not by role;
+# only when the reporter is the ticket creator or current assignee.
+ATTACHMENT_ACTOR_EXCEPTIONS = frozenset({"ticket_creator", "ticket_assignee"})
 
-def has_capability(membership: dict | None, capability: Capability | str) -> bool:
-    """Return whether a validated membership grants ``capability``."""
+
+def effective_capabilities(membership: dict | None) -> frozenset[Capability]:
+    """Resolve global role defaults plus this project's grants/revocations."""
     if not membership:
-        return False
+        return frozenset()
     role = membership.get("role")
     if role == "super_admin":
+        return frozenset(Capability)
+
+    capabilities = set(ROLE_CAPABILITIES.get(role, frozenset()))
+    for value in membership.get("capability_revocations") or []:
+        try:
+            capabilities.discard(Capability(value))
+        except ValueError:
+            continue
+    for value in membership.get("capability_grants") or []:
+        try:
+            capabilities.add(Capability(value))
+        except ValueError:
+            continue
+    return frozenset(capabilities)
+
+
+def has_capability(membership: dict | None, capability: Capability | str) -> bool:
+    """Return whether effective project permissions grant ``capability``."""
+    try:
+        capability = Capability(capability)
+    except ValueError:
+        return False
+    return capability in effective_capabilities(membership)
+
+
+def can_upload_attachment(
+    ticket: dict,
+    current_user: dict,
+    membership: dict | None,
+) -> bool:
+    """Evaluate the complete attachment-upload policy in one place."""
+    user_id = str(current_user.get("_id"))
+    return any(
+        (
+            has_capability(membership, Capability.UPLOAD_ATTACHMENTS),
+            user_id == str(ticket.get("userId")),
+            user_id == str(ticket.get("assigned_agent")),
+            current_user.get("role") == "super_admin",
+        )
+    )
+
+
+def can_delete_attachment(
+    attachment: dict,
+    current_user: dict,
+    membership: dict | None,
+) -> bool:
+    """Evaluate the complete attachment-delete policy in one place."""
+    return any(
+        (
+            has_capability(membership, Capability.DELETE_ATTACHMENTS),
+            str(attachment.get("uploaded_by")) == str(current_user.get("_id")),
+            current_user.get("role") == "super_admin",
+        )
+    )
+
+
+def can_assign_ticket(
+    ticket: dict,
+    current_user: dict,
+    membership: dict | None,
+    target_user_id: str | ObjectId,
+) -> bool:
+    """Evaluate lead reassignment and member self-assignment in one place."""
+    if has_capability(membership, Capability.REASSIGN_TICKETS):
         return True
-    return capability in _ROLE_CAPABILITIES.get(role, frozenset())
+    if not has_capability(membership, Capability.ASSIGN_TICKETS):
+        return False
+
+    current_user_id = str(current_user.get("_id"))
+    return current_user_id == str(target_user_id) and ticket.get("assigned_agent") in (
+        None,
+        current_user_id,
+    )
+
+
+def transition_guard_error(
+    transition: dict,
+    ticket: dict,
+    membership: dict | None,
+) -> tuple[int, str] | None:
+    """Evaluate data-driven workflow restrictions outside endpoint code."""
+    guard = transition.get("guard", {})
+    allowed_roles = {
+        role.value if isinstance(role, ProjectRole) else role
+        for role in guard.get(
+            "allowed_roles",
+            [ProjectRole.LEAD.value, ProjectRole.MEMBER.value],
+        )
+    }
+    if not membership or membership.get("role") not in allowed_roles:
+        return 403, "Your project role cannot use this transition"
+    if guard.get("requires_assignee") and not ticket.get("assigned_agent"):
+        return 400, "Ticket must be assigned before using this transition"
+    return None
 
 
 def require_capability(
@@ -216,7 +315,6 @@ def require_project_membership(
     current_user: dict,
     project_members_collection,
     *,
-    allowed_roles: Collection[str] | None = None,
     capability: Capability | str | None = None,
     role_detail: str = "You do not have permission to perform this project action",
     allow_super_admin: bool = False,
@@ -252,9 +350,6 @@ def require_project_membership(
             detail="Your project membership has an invalid role",
         )
 
-    if allowed_roles is not None and membership.get("role") not in allowed_roles:
-        raise HTTPException(status_code=403, detail=role_detail)
-
     if capability is not None:
         require_capability(membership, capability, detail=role_detail)
 
@@ -266,7 +361,6 @@ def require_ticket_membership(
     current_user: dict,
     project_members_collection,
     *,
-    allowed_roles: Collection[str] | None = None,
     capability: Capability | str | None = None,
     role_detail: str = "You do not have permission to perform this ticket action",
 ) -> dict:
@@ -278,7 +372,6 @@ def require_ticket_membership(
         project_id,
         current_user,
         project_members_collection,
-        allowed_roles=allowed_roles,
         capability=capability,
         role_detail=role_detail,
     )

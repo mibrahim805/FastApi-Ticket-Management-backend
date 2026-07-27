@@ -6,6 +6,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.api.auth import get_current_user
 from app.api.permissions import (
+    ROLE_CAPABILITIES,
     SUPER_ADMIN_ROLES,
     Capability,
     ensure_role,
@@ -26,6 +27,7 @@ from app.db.db import (
 from app.models.project import (
     ProjectCreate,
     ProjectMemberRole,
+    ProjectRolePermissionUpdate,
     ProjectStatusAssign,
     ProjectUpdate,
 )
@@ -110,6 +112,7 @@ def create_project(
             "created_at": datetime.now(timezone.utc),
             "assigned_statuses": [],
             "default_status_id": None,
+            "permission_overrides": {},
         }
     )
     try:
@@ -172,6 +175,115 @@ def get_project(project_id: str, current_user: dict = Depends(get_current_user))
         capability=Capability.VIEW_PROJECT,
     )
     return {"project": _serialize_project(project)}
+
+
+def _permission_override(project: dict, role: str) -> dict:
+    override = (project.get("permission_overrides") or {}).get(role) or {}
+    return {
+        "grants": sorted(set(override.get("grants") or [])),
+        "revocations": sorted(set(override.get("revocations") or [])),
+    }
+
+
+def _serialize_project_permissions(project: dict) -> dict:
+    roles = {}
+    for role in ProjectMemberRole:
+        override = _permission_override(project, role.value)
+        effective = set(ROLE_CAPABILITIES[role.value])
+        effective.difference_update(
+            Capability(value)
+            for value in override["revocations"]
+            if value in Capability._value2member_map_
+        )
+        effective.update(
+            Capability(value)
+            for value in override["grants"]
+            if value in Capability._value2member_map_
+        )
+        roles[role.value] = {
+            "defaults": sorted(
+                capability.value for capability in ROLE_CAPABILITIES[role.value]
+            ),
+            **override,
+            "effective": sorted(capability.value for capability in effective),
+        }
+    return {"project_id": str(project["_id"]), "roles": roles}
+
+
+@router.get("/{project_id}/permissions")
+def get_project_permissions(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
+    )
+    return _serialize_project_permissions(project)
+
+
+@router.put("/{project_id}/permissions")
+def update_project_permissions(
+    project_id: str,
+    payload: ProjectRolePermissionUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+
+    unknown = (payload.grants | payload.revocations) - {
+        capability.value for capability in Capability
+    }
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown capabilities: {', '.join(sorted(unknown))}",
+        )
+    overlap = payload.grants & payload.revocations
+    if overlap:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Capabilities cannot be both granted and revoked: "
+                f"{', '.join(sorted(overlap))}"
+            ),
+        )
+    if Capability.MANAGE_PROJECT.value in payload.grants | payload.revocations:
+        raise HTTPException(
+            status_code=400,
+            detail="manage_project cannot be overridden",
+        )
+
+    role = payload.role.value
+    overrides = dict(project.get("permission_overrides") or {})
+    overrides[role] = {
+        "grants": sorted(payload.grants),
+        "revocations": sorted(payload.revocations),
+    }
+    projects_collection.update_one(
+        {"_id": project_object_id},
+        {"$set": {"permission_overrides": overrides}},
+    )
+
+    for membership in project_members_collection.find(
+        {"project_id": project_object_id, "role": role}
+    ):
+        project_members_collection.update_one(
+            {"_id": membership["_id"]},
+            {
+                "$set": {
+                    "capability_grants": sorted(payload.grants),
+                    "capability_revocations": sorted(payload.revocations),
+                }
+            },
+        )
+
+    updated_project = {**project, "permission_overrides": overrides}
+    return _serialize_project_permissions(updated_project)
 
 
 @router.get("/{project_id}/workflow")
@@ -399,7 +511,7 @@ def add_project_member(
     member: ProjectMemberCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    project_object_id, _ = _get_project_or_404(project_id)
+    project_object_id, project = _get_project_or_404(project_id)
     _require_project_admin(project_object_id, current_user)
 
     member_user_id = parse_object_id(member.user_id, "user_id")
@@ -419,11 +531,14 @@ def add_project_member(
             detail="User is already a member of this project",
         )
 
+    override = _permission_override(project, member.role.value)
     result = project_members_collection.insert_one(
         {
             "project_id": project_object_id,
             "user_id": member_user_id,
             "role": member.role.value,
+            "capability_grants": override["grants"],
+            "capability_revocations": override["revocations"],
         }
     )
     return {
