@@ -12,10 +12,10 @@ from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.notification_delivery import create_notification
 from app.api.permissions import (
-    PROJECT_LEAD_ROLES,
-    PROJECT_WORK_ROLES,
+    Capability,
     get_accessible_project_ids,
     get_project_membership,
+    has_capability,
     require_project_membership,
     require_ticket_membership,
 )
@@ -190,6 +190,7 @@ def _apply_ticket_transition(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.TRANSITION_TICKETS,
     )
     transition_project_id = transition.get("project_id")
     if transition_project_id is not None and str(transition_project_id) != str(
@@ -568,7 +569,7 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
 
     ticket["_id"] = str(ticket["_id"])
     comment_query = {"ticket_id": ticket_id}
-    if membership.get("role") == ProjectRole.REPORTER.value:
+    if not has_capability(membership, Capability.VIEW_INTERNAL_COMMENTS):
         comment_query["visibility"] = "public"
     comments = list(comments_collection.find(comment_query))
     for comment in comments:
@@ -717,7 +718,7 @@ def create_ticket_link(
         from_ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.LINK_TICKETS,
         role_detail="Only project leads or members can link tickets",
     )
 
@@ -732,7 +733,7 @@ def create_ticket_link(
         to_ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.LINK_TICKETS,
         role_detail="Only project leads or members can link tickets",
     )
 
@@ -839,7 +840,7 @@ def update_ticket(
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.UPDATE_TICKET,
         role_detail="Only project leads or members can update tickets",
     )
 
@@ -913,7 +914,7 @@ def assign_ticket(
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.ASSIGN_TICKETS,
         role_detail="Only project leads or members can assign tickets",
     )
 
@@ -927,7 +928,9 @@ def assign_ticket(
         agent_object_id,
         project_members_collection,
     )
-    if not target_membership or target_membership.get("role") not in PROJECT_WORK_ROLES:
+    if not target_membership or not has_capability(
+        target_membership, Capability.ASSIGN_TICKETS
+    ):
         raise HTTPException(
             status_code=400,
             detail="Target user must be a lead or member of this project",
@@ -1467,7 +1470,7 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_LEAD_ROLES,
+        capability=Capability.DELETE_TICKETS,
         role_detail="Only project leads can delete tickets",
     )
 

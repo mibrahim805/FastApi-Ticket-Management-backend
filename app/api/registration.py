@@ -23,6 +23,7 @@ from app.api.rate_limit import (
 )
 from app.db.db import reset_tokens_collection, user_collection
 from app.models.registration import (
+    ChangeUserRole,
     Role,
     SuperAminRegister,
     UserLogin,
@@ -181,6 +182,42 @@ def activate_or_deactivate(
         return {"message": "User deactivated successfully"}
     else:
         return {"message": "User activated successfully"}
+
+
+@router.put("/change_role/{user_id}", tags=["Auth"])
+def change_user_role(
+    user_id: str,
+    payload: ChangeUserRole,
+    current_user: dict = Depends(_require_super_admin),
+):
+    """Change a user's global role; project membership remains unchanged."""
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super admin can change user roles",
+    )
+    try:
+        target_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    target = user_collection.find_one({"_id": target_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == Role.SUPER_ADMIN.value:
+        raise HTTPException(status_code=403, detail="Cannot change super admin role")
+    if payload.role == Role.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Cannot assign super admin role")
+
+    user_collection.update_one(
+        {"_id": target_id},
+        {"$set": {"role": payload.role.value}},
+    )
+    return {
+        "message": "User role updated successfully",
+        "user_id": user_id,
+        "role": payload.role.value,
+    }
 
 
 @router.put("/update_yourself/", tags=["Auth"])

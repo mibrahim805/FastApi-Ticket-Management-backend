@@ -9,8 +9,11 @@ from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.notification_delivery import create_notification
 from app.api.permissions import (
+    Capability,
     get_project_membership,
+    has_capability,
     parse_object_id,
+    require_capability,
     require_ticket_participant,
 )
 from app.api.watcher_notifications import notify_ticket_watchers
@@ -28,7 +31,6 @@ from app.models.comment import (
     CommentUpdate,
     CommentVisibility,
 )
-from app.models.project_member import ProjectRole
 
 router = APIRouter()
 
@@ -61,9 +63,10 @@ def _get_comment_or_404(comment_id: str) -> tuple[ObjectId, dict]:
 
 
 def _require_comment_visible(comment: dict, membership: dict) -> None:
-    if (
-        membership.get("role") == ProjectRole.REPORTER.value
-        and comment.get("visibility") == CommentVisibility.INTERNAL.value
+    if comment.get(
+        "visibility"
+    ) == CommentVisibility.INTERNAL.value and not has_capability(
+        membership, Capability.VIEW_INTERNAL_COMMENTS
     ):
         # Do not disclose the existence of an internal comment to reporters.
         raise HTTPException(status_code=404, detail="Comment not found")
@@ -146,14 +149,12 @@ def _require_mentioned_user_access(
             detail=(f"Mentioned user '@{handle}' is not a member of this project"),
         )
 
-    if (
-        membership.get("role") == ProjectRole.REPORTER.value
-        and visibility == CommentVisibility.INTERNAL.value
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(f"Mentioned user '@{handle}' cannot view internal comments"),
-        )
+    if visibility == CommentVisibility.INTERNAL.value:
+        if not has_capability(membership, Capability.VIEW_INTERNAL_COMMENTS):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Mentioned user '@{handle}' cannot view internal comments"),
+            )
 
 
 def _resolve_mentions(
@@ -255,12 +256,10 @@ def _create_comment_document(
     parent_id: str | None = None,
 ) -> dict:
     visibility = _visibility_value(comment.visibility)
-    if (
-        membership.get("role") == ProjectRole.REPORTER.value
-        and visibility == CommentVisibility.INTERNAL.value
-    ):
-        raise HTTPException(
-            status_code=403,
+    if visibility == CommentVisibility.INTERNAL.value:
+        require_capability(
+            membership,
+            Capability.CREATE_INTERNAL_COMMENTS,
             detail="You do not have permission to create internal comments",
         )
 
@@ -414,7 +413,7 @@ def get_comments(
         project_members_collection,
     )
     comment_query = {"ticket_id": canonical_ticket_id}
-    if membership.get("role") == ProjectRole.REPORTER.value:
+    if not has_capability(membership, Capability.VIEW_INTERNAL_COMMENTS):
         comment_query["visibility"] = CommentVisibility.PUBLIC.value
 
     comments = [
@@ -450,12 +449,10 @@ def update_comment(
     new_visibility = _visibility_value(
         update_data.get("visibility", existing_comment["visibility"])
     )
-    if (
-        membership.get("role") == ProjectRole.REPORTER.value
-        and new_visibility == CommentVisibility.INTERNAL.value
-    ):
-        raise HTTPException(
-            status_code=403,
+    if new_visibility == CommentVisibility.INTERNAL.value:
+        require_capability(
+            membership,
+            Capability.CREATE_INTERNAL_COMMENTS,
             detail="You do not have permission to create internal comments",
         )
 

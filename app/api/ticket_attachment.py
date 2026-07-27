@@ -20,14 +20,18 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
-from app.api.permissions import parse_object_id, require_ticket_participant
+from app.api.permissions import (
+    Capability,
+    has_capability,
+    parse_object_id,
+    require_ticket_participant,
+)
 from app.db.db import (
     attachment_collection,
     project_members_collection,
     ticket_collection,
 )
 from app.models.attachment import Attachment
-from app.models.project_member import ProjectRole
 from app.storage.attachments import (
     AttachmentStorage,
     AttachmentStorageError,
@@ -110,13 +114,11 @@ def _require_attachment_upload_permission(
     membership: dict,
 ) -> None:
     user_id = str(current_user.get("_id"))
-    can_upload = any(
-        (
-            user_id == str(ticket.get("userId")),
-            user_id == str(ticket.get("assigned_agent")),
-            membership.get("role") == ProjectRole.LEAD.value,
-            current_user.get("role") == "super_admin",
-        )
+    can_upload = (
+        user_id == str(ticket.get("userId"))
+        or user_id == str(ticket.get("assigned_agent"))
+        or has_capability(membership, Capability.UPLOAD_ATTACHMENTS)
+        or current_user.get("role") == "super_admin"
     )
     if not can_upload:
         raise HTTPException(
@@ -348,7 +350,7 @@ def delete_attachment(
     )
 
     is_uploader = str(attachment.get("uploaded_by")) == str(current_user.get("_id"))
-    is_project_lead = membership.get("role") == ProjectRole.LEAD.value
+    is_project_lead = has_capability(membership, Capability.DELETE_ATTACHMENTS)
     is_super_admin = current_user.get("role") == "super_admin"
     if not (is_uploader or is_project_lead or is_super_admin):
         raise HTTPException(

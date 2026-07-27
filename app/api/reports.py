@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.auth import get_current_user
 from app.api.permissions import (
     ADMIN_ROLES,
+    Capability,
     ensure_role,
     get_accessible_project_ids,
     parse_object_id,
@@ -115,11 +116,12 @@ def _require_project_report_access(
     project_object_id: ObjectId,
     current_user: dict,
 ) -> None:
-    if current_user.get("role") not in {"admin", "super_admin"}:
+    if current_user.get("role") not in ADMIN_ROLES:
         require_project_membership(
             project_object_id,
             current_user,
             project_members_collection,
+            capability=Capability.VIEW_REPORTS,
         )
 
 

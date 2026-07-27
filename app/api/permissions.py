@@ -1,4 +1,5 @@
 from collections.abc import Collection
+from enum import Enum
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -17,6 +18,124 @@ PROJECT_WORK_ROLES = frozenset(
     }
 )
 PROJECT_LEAD_ROLES = frozenset({ProjectRole.LEAD.value})
+
+
+class Capability(str, Enum):
+    """Actions governed by a project's membership role.
+
+    Keep authorization decisions expressed in terms of capabilities at call
+    sites.  The role-to-capability mapping is deliberately kept here so a new
+    endpoint cannot accidentally invent a different interpretation of a role.
+    """
+
+    VIEW_PROJECT = "view_project"
+    VIEW_TICKET = "view_ticket"
+    CREATE_TICKET = "create_ticket"
+    UPDATE_TICKET = "update_ticket"
+    MANAGE_TICKET_WORK = "manage_ticket_work"
+    TRANSITION_TICKETS = "transition_tickets"
+    ASSIGN_TICKETS = "assign_tickets"
+    LINK_TICKETS = "link_tickets"
+    MANAGE_SPRINTS = "manage_sprints"
+    MANAGE_PROJECT = "manage_project"
+    VIEW_REPORTS = "view_reports"
+    DELETE_TICKETS = "delete_tickets"
+    VIEW_INTERNAL_COMMENTS = "view_internal_comments"
+    CREATE_INTERNAL_COMMENTS = "create_internal_comments"
+    CREATE_PUBLIC_COMMENTS = "create_public_comments"
+    MANAGE_NOTIFICATION_PREFERENCES = "manage_notification_preferences"
+    VIEW_ATTACHMENTS = "view_attachments"
+    UPLOAD_ATTACHMENTS = "upload_attachments"
+    DELETE_ATTACHMENTS = "delete_attachments"
+
+
+_ROLE_CAPABILITIES = {
+    ProjectRole.LEAD.value: frozenset(Capability),
+    ProjectRole.MEMBER.value: frozenset(
+        {
+            Capability.VIEW_PROJECT,
+            Capability.VIEW_TICKET,
+            Capability.CREATE_TICKET,
+            Capability.UPDATE_TICKET,
+            Capability.MANAGE_TICKET_WORK,
+            Capability.TRANSITION_TICKETS,
+            Capability.ASSIGN_TICKETS,
+            Capability.LINK_TICKETS,
+            Capability.VIEW_INTERNAL_COMMENTS,
+            Capability.CREATE_INTERNAL_COMMENTS,
+            Capability.CREATE_PUBLIC_COMMENTS,
+            Capability.MANAGE_NOTIFICATION_PREFERENCES,
+            Capability.VIEW_ATTACHMENTS,
+            Capability.VIEW_REPORTS,
+        }
+    ),
+    ProjectRole.REPORTER.value: frozenset(
+        {
+            Capability.VIEW_PROJECT,
+            Capability.VIEW_TICKET,
+            Capability.CREATE_TICKET,
+            Capability.CREATE_PUBLIC_COMMENTS,
+            Capability.MANAGE_NOTIFICATION_PREFERENCES,
+            Capability.VIEW_ATTACHMENTS,
+            Capability.VIEW_REPORTS,
+        }
+    ),
+}
+
+
+def has_capability(membership: dict | None, capability: Capability | str) -> bool:
+    """Return whether a validated membership grants ``capability``."""
+    if not membership:
+        return False
+    role = membership.get("role")
+    if role == "super_admin":
+        return True
+    return capability in _ROLE_CAPABILITIES.get(role, frozenset())
+
+
+def require_capability(
+    membership: dict | None,
+    capability: Capability | str,
+    *,
+    detail: str = "You do not have permission to perform this action",
+) -> dict:
+    if not has_capability(membership, capability):
+        raise HTTPException(status_code=403, detail=detail)
+    return membership
+
+
+def require_project_capability(
+    project_id: str | ObjectId,
+    current_user: dict,
+    project_members_collection,
+    capability: Capability | str,
+    *,
+    detail: str = "You do not have permission to perform this project action",
+    allow_super_admin: bool = False,
+) -> dict:
+    membership = require_project_membership(
+        project_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=allow_super_admin,
+    )
+    return require_capability(membership, capability, detail=detail)
+
+
+def require_ticket_capability(
+    ticket: dict,
+    current_user: dict,
+    project_members_collection,
+    capability: Capability | str,
+    *,
+    detail: str = "You do not have permission to perform this ticket action",
+) -> dict:
+    membership = require_ticket_membership(
+        ticket,
+        current_user,
+        project_members_collection,
+    )
+    return require_capability(membership, capability, detail=detail)
 
 
 def ensure_role(
@@ -98,6 +217,7 @@ def require_project_membership(
     project_members_collection,
     *,
     allowed_roles: Collection[str] | None = None,
+    capability: Capability | str | None = None,
     role_detail: str = "You do not have permission to perform this project action",
     allow_super_admin: bool = False,
 ) -> dict:
@@ -135,6 +255,9 @@ def require_project_membership(
     if allowed_roles is not None and membership.get("role") not in allowed_roles:
         raise HTTPException(status_code=403, detail=role_detail)
 
+    if capability is not None:
+        require_capability(membership, capability, detail=role_detail)
+
     return membership
 
 
@@ -144,6 +267,7 @@ def require_ticket_membership(
     project_members_collection,
     *,
     allowed_roles: Collection[str] | None = None,
+    capability: Capability | str | None = None,
     role_detail: str = "You do not have permission to perform this ticket action",
 ) -> dict:
     project_id = ticket.get("project_id")
@@ -155,6 +279,7 @@ def require_ticket_membership(
         current_user,
         project_members_collection,
         allowed_roles=allowed_roles,
+        capability=capability,
         role_detail=role_detail,
     )
 

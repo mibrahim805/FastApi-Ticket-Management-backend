@@ -6,10 +6,10 @@ from pymongo.errors import DuplicateKeyError
 
 from app.api.auth import get_current_user
 from app.api.permissions import (
-    PROJECT_LEAD_ROLES,
-    PROJECT_MEMBER_ROLES,
     SUPER_ADMIN_ROLES,
+    Capability,
     ensure_role,
+    has_capability,
     parse_object_id,
     require_project_membership,
     require_role,
@@ -84,7 +84,7 @@ def _require_project_admin(project_id, current_user: dict) -> dict:
         project_id,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_LEAD_ROLES,
+        capability=Capability.MANAGE_PROJECT,
         role_detail="Only project leads or super admins can configure the project",
         allow_super_admin=True,
     )
@@ -139,7 +139,7 @@ def get_projects(current_user: dict = Depends(get_current_user)):
         projects = []
         seen_project_ids = set()
         for membership in memberships:
-            if membership.get("role") not in PROJECT_MEMBER_ROLES:
+            if not has_capability(membership, Capability.VIEW_PROJECT):
                 continue
             project_id = membership.get("project_id")
             if not project_id or project_id in seen_project_ids:
@@ -169,6 +169,7 @@ def get_project(project_id: str, current_user: dict = Depends(get_current_user))
         current_user,
         project_members_collection,
         allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
     )
     return {"project": _serialize_project(project)}
 
@@ -184,6 +185,7 @@ def get_project_workflow(
         current_user,
         project_members_collection,
         allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
     )
     return {
         "project_id": project_id,
@@ -441,6 +443,7 @@ def get_project_members(
         current_user,
         project_members_collection,
         allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
     )
 
     members = []

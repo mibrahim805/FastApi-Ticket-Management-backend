@@ -7,7 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo import ReturnDocument
 
 from app.api.auth import get_current_user
-from app.api.permissions import require_project_membership
+from app.api.permissions import (
+    Capability,
+    require_project_capability,
+)
 from app.db.db import (
     notification_preferences_collection,
     notifications_collection,
@@ -36,10 +39,12 @@ def _require_project_preference_access(
     project_object_id = _parse_object_id(project_id, "project_id")
     if not projects_collection.find_one({"_id": project_object_id}):
         raise HTTPException(status_code=404, detail="Project not found")
-    require_project_membership(
+    require_project_capability(
         project_object_id,
         current_user,
         project_members_collection,
+        Capability.MANAGE_NOTIFICATION_PREFERENCES,
+        detail="Only project members can manage notification preferences",
         allow_super_admin=True,
     )
     return str(project_object_id)
