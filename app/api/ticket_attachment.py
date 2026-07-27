@@ -21,9 +21,11 @@ from starlette.concurrency import run_in_threadpool
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import (
+    Capability,
     can_delete_attachment,
     can_upload_attachment,
     parse_object_id,
+    require_capability,
     require_ticket_participant,
 )
 from app.db.db import (
@@ -118,7 +120,7 @@ def _require_attachment_upload_permission(
             status_code=403,
             detail=(
                 "Only the ticket creator, assigned agent, project lead, or "
-                "super admin can upload attachments"
+                "a role granted upload permission can upload attachments"
             ),
         )
 
@@ -278,10 +280,15 @@ def list_attachments(
     current_user=Depends(get_current_user),
 ):
     canonical_ticket_id, ticket = _get_ticket_or_404(ticket_id)
-    require_ticket_participant(
+    membership = require_ticket_participant(
         ticket,
         current_user,
         project_members_collection,
+    )
+    require_capability(
+        membership,
+        Capability.VIEW_ATTACHMENTS,
+        detail="You do not have permission to view attachments",
     )
     attachments = attachment_collection.find({"ticket_id": canonical_ticket_id}).sort(
         "uploaded_at", 1
@@ -296,10 +303,15 @@ def download_attachment(
 ):
     _, attachment = _get_attachment_or_404(attachment_id)
     _, ticket = _get_ticket_or_404(str(attachment.get("ticket_id")))
-    require_ticket_participant(
+    membership = require_ticket_participant(
         ticket,
         current_user,
         project_members_collection,
+    )
+    require_capability(
+        membership,
+        Capability.VIEW_ATTACHMENTS,
+        detail="You do not have permission to view attachments",
     )
 
     storage = _storage_for_attachment(attachment)
@@ -345,7 +357,10 @@ def delete_attachment(
     if not can_delete_attachment(attachment, current_user, membership):
         raise HTTPException(
             status_code=403,
-            detail="Only the uploader or a project lead can delete this attachment",
+            detail=(
+                "Only the uploader, project lead, or a role granted delete "
+                "permission can delete this attachment"
+            ),
         )
 
     storage = _storage_for_attachment(attachment)

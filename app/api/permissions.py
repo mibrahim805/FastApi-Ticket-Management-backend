@@ -7,9 +7,10 @@ from fastapi import Depends, HTTPException
 
 from app.api.auth import get_current_user
 from app.models.project_member import ProjectRole
+from app.models.registration import GlobalRole
 
-SUPER_ADMIN_ROLES = frozenset({"super_admin"})
-ADMIN_ROLES = frozenset({"admin", "super_admin"})
+SUPER_ADMIN_ROLES = frozenset({GlobalRole.SUPER_ADMIN.value})
+ADMIN_ROLES = frozenset({GlobalRole.ADMIN.value, GlobalRole.SUPER_ADMIN.value})
 PROJECT_MEMBER_ROLES = frozenset(role.value for role in ProjectRole)
 
 
@@ -306,6 +307,7 @@ def get_accessible_project_ids(
             for membership in memberships
             if membership.get("project_id")
             and membership.get("role") in PROJECT_MEMBER_ROLES
+            and has_capability(membership, Capability.VIEW_PROJECT)
         )
     )
 

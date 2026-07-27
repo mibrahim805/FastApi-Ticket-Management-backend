@@ -212,6 +212,11 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
     )
     monkeypatch.setattr(
         app_main,
+        "migrate_legacy_global_roles",
+        lambda: calls.append("roles_migrated"),
+    )
+    monkeypatch.setattr(
+        app_main,
         "migrate_legacy_workflow_transitions",
         lambda: calls.append("migrated"),
     )
@@ -222,7 +227,27 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
 
     asyncio.run(run_lifespan())
 
-    assert calls == ["created", "migrated"]
+    assert calls == ["created", "roles_migrated", "migrated"]
+
+
+def test_legacy_inert_global_roles_are_removed(monkeypatch, fake_collection):
+    ordinary_ids = [ObjectId(), ObjectId(), ObjectId()]
+    admin_id = ObjectId()
+    users = fake_collection.__class__(
+        [
+            {"_id": ordinary_ids[0], "role": "user"},
+            {"_id": ordinary_ids[1], "role": "customer"},
+            {"_id": ordinary_ids[2], "role": "agent"},
+            {"_id": admin_id, "role": "admin"},
+        ]
+    )
+    monkeypatch.setattr(database, "user_collection", users)
+
+    assert database.migrate_legacy_global_roles() == 3
+    assert all(
+        "role" not in users.find_one({"_id": user_id}) for user_id in ordinary_ids
+    )
+    assert users.find_one({"_id": admin_id})["role"] == "admin"
 
 
 def test_legacy_embedded_workflow_is_migrated(

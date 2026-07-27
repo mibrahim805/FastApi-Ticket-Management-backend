@@ -1,16 +1,23 @@
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.api import registration
-from app.models.registration import Role, SuperAminRegister, UserLogin, UserRegister
+from app.models.registration import (
+    AdminRegister,
+    GlobalRole,
+    SuperAdminRegister,
+    UserLogin,
+    UserRegister,
+)
 
 
 def test_register_super_admin_inserts_first_admin(monkeypatch, fake_collection):
     monkeypatch.setattr(registration, "user_collection", fake_collection)
     monkeypatch.setattr(registration, "hash_password", lambda value: f"hashed:{value}")
 
-    payload = SuperAminRegister(
+    payload = SuperAdminRegister(
         name="Ibrahim", email="admin@example.com", password="secret"
     )
 
@@ -21,20 +28,19 @@ def test_register_super_admin_inserts_first_admin(monkeypatch, fake_collection):
     assert fake_collection.documents[0]["hashed_password"] == "hashed:secret"
 
 
-def test_register_admin_or_agent_blocks_agent(monkeypatch, fake_collection):
+def test_register_admin_blocks_ordinary_user(monkeypatch, fake_collection):
     monkeypatch.setattr(registration, "user_collection", fake_collection)
 
-    payload = UserRegister(
+    payload = AdminRegister(
         name="Agent",
         email="agent@example.com",
         password="secret",
-        role=Role.ADMIN.value,
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        registration.register_admin_or_agent(
+        registration.register_admin(
             payload,
-            current_user={"role": Role.AGENT.value},
+            current_user={"_id": ObjectId()},
         )
 
     assert exc_info.value.status_code == 403
@@ -45,7 +51,7 @@ def test_register_rejects_second_super_admin(monkeypatch, fake_collection):
     monkeypatch.setattr(registration, "user_collection", fake_collection)
 
     response = registration.register_super_admin(
-        SuperAminRegister(
+        SuperAdminRegister(
             name="Second",
             email="second@example.com",
             password="secret",
@@ -64,32 +70,12 @@ def test_register_rejects_duplicate_email(monkeypatch, fake_collection):
         name="User",
         email="taken@example.com",
         password="secret",
-        role=Role.USER.value,
     )
 
     with pytest.raises(HTTPException) as exc_info:
         registration.register(payload)
 
     assert exc_info.value.status_code == 400
-
-
-def test_register_admin_or_agent_blocks_customer(monkeypatch, fake_collection):
-    monkeypatch.setattr(registration, "user_collection", fake_collection)
-
-    payload = UserRegister(
-        name="Admin",
-        email="admin@example.com",
-        password="secret",
-        role=Role.ADMIN.value,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        registration.register_admin_or_agent(
-            payload,
-            current_user={"role": Role.CUSTOMER.value},
-        )
-
-    assert exc_info.value.status_code == 403
 
 
 def test_register_succeeds(monkeypatch, fake_collection):
@@ -104,34 +90,29 @@ def test_register_succeeds(monkeypatch, fake_collection):
         name="User",
         email="user@example.com",
         password="secret",
-        role=Role.USER.value,
     )
 
     response = registration.register(payload)
 
     assert response == {"message": "User registered successfully"}
 
-    assert fake_collection.documents[0]["role"] == Role.USER.value
+    assert "role" not in fake_collection.documents[0]
     assert fake_collection.documents[0]["hashed_password"] == "hashed:secret"
 
 
-def test_register_rejects_invalid_role(
+def test_public_registration_does_not_accept_a_global_role(
     monkeypatch,
     fake_collection,
 ):
-    monkeypatch.setattr(registration, "user_collection", fake_collection)
-
-    payload = UserRegister(
-        name="User",
-        email="user@example.com",
-        password="secret",
-        role="invalid-role",
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        registration.register(payload)
-
-    assert exc_info.value.status_code == 400
+    with pytest.raises(ValidationError):
+        UserRegister.model_validate(
+            {
+                "name": "User",
+                "email": "user@example.com",
+                "password": "secret",
+                "role": "admin",
+            }
+        )
 
 
 def test_login_returns_token_for_valid_user(monkeypatch, fake_collection):
@@ -204,7 +185,7 @@ def test_login_rejects_unknown_email(monkeypatch, fake_collection):
     assert exc_info.value.status_code == 401
 
 
-def test_register_admin_or_agent_success(
+def test_register_admin_success(
     monkeypatch,
     fake_collection,
 ):
@@ -215,24 +196,23 @@ def test_register_admin_or_agent_success(
         lambda value: f"hashed:{value}",
     )
 
-    payload = UserRegister(
+    payload = AdminRegister(
         name="Admin",
         email="admin@example.com",
         password="secret",
-        role=Role.ADMIN.value,
     )
 
-    response = registration.register_admin_or_agent(
+    response = registration.register_admin(
         payload,
-        current_user={"role": Role.SUPER_ADMIN.value},
+        current_user={"role": GlobalRole.SUPER_ADMIN.value},
     )
 
     assert response == {"message": "Admin registered successfully"}
 
-    assert fake_collection.documents[0]["role"] == Role.ADMIN.value
+    assert fake_collection.documents[0]["role"] == GlobalRole.ADMIN.value
 
 
-def test_register_admin_or_agent_duplicate_email(
+def test_register_admin_duplicate_email(
     monkeypatch,
     fake_collection,
 ):
@@ -244,43 +224,16 @@ def test_register_admin_or_agent_duplicate_email(
         fake_collection,
     )
 
-    payload = UserRegister(
+    payload = AdminRegister(
         name="Admin",
         email="admin@example.com",
         password="secret",
-        role=Role.ADMIN.value,
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        registration.register_admin_or_agent(
+        registration.register_admin(
             payload,
-            current_user={"role": Role.SUPER_ADMIN.value},
-        )
-
-    assert exc_info.value.status_code == 400
-
-
-def test_register_admin_or_agent_invalid_role(
-    monkeypatch,
-    fake_collection,
-):
-    monkeypatch.setattr(
-        registration,
-        "user_collection",
-        fake_collection,
-    )
-
-    payload = UserRegister(
-        name="User",
-        email="user@example.com",
-        password="secret",
-        role=Role.USER.value,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        registration.register_admin_or_agent(
-            payload,
-            current_user={"role": Role.SUPER_ADMIN.value},
+            current_user={"role": GlobalRole.SUPER_ADMIN.value},
         )
 
     assert exc_info.value.status_code == 400

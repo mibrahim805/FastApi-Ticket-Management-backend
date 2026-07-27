@@ -15,12 +15,17 @@ from app.api import (
     ticket,
     ticket_attachment,
 )
-from app.db.db import ensure_database_indexes, migrate_legacy_workflow_transitions
+from app.db.db import (
+    ensure_database_indexes,
+    migrate_legacy_global_roles,
+    migrate_legacy_workflow_transitions,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_database_indexes()
+    migrate_legacy_global_roles()
     migrate_legacy_workflow_transitions()
     yield
 

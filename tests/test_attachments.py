@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from starlette.datastructures import Headers, UploadFile
 
 from app.api import ticket_attachment
+from app.api.permissions import Capability
 from app.main import app
 from app.storage.attachments import (
     AttachmentStorageError,
@@ -333,6 +334,43 @@ def test_list_attachments_requires_access_and_serializes_download_url(
             current_user={"_id": outsider_id, "role": "agent"},
         )
     assert exc_info.value.status_code == 403
+
+
+def test_project_scheme_can_revoke_attachment_viewing(
+    monkeypatch,
+    fake_collection,
+    project_members,
+):
+    project_id = ObjectId()
+    ticket_id = ObjectId()
+    member_id = ObjectId()
+    monkeypatch.setattr(
+        ticket_attachment,
+        "ticket_collection",
+        fake_collection.__class__([_ticket(project_id, ticket_id)]),
+    )
+    monkeypatch.setattr(
+        ticket_attachment,
+        "attachment_collection",
+        fake_collection.__class__(),
+    )
+    project_members.insert_one(
+        {
+            "project_id": project_id,
+            "user_id": member_id,
+            "role": "member",
+            "capability_revocations": [Capability.VIEW_ATTACHMENTS.value],
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        ticket_attachment.list_attachments(
+            str(ticket_id),
+            current_user={"_id": member_id, "role": "agent"},
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "You do not have permission to view attachments"
 
 
 def test_download_attachment_returns_bytes_for_ticket_member(

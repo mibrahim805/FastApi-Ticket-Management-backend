@@ -1,25 +1,29 @@
 import enum
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 
-class Role(str, enum.Enum):
+class GlobalRole(str, enum.Enum):
     SUPER_ADMIN = "super_admin"
-    USER = "user"
     ADMIN = "admin"
-    CUSTOMER = "customer"
-    AGENT = "agent"
 
 
 class UserRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     email: EmailStr
     password: str
     is_active: bool = True
-    role: str = Role.USER.value
 
 
-class SuperAminRegister(BaseModel):
+class AdminRegister(UserRegister):
+    """Account payload for the one meaningful delegated global role."""
+
+
+class SuperAdminRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     email: EmailStr
     password: str
@@ -30,8 +34,8 @@ class UserLogin(BaseModel):
     password: str
 
 
-class ChangeUserRole(BaseModel):
-    role: Role
+class ChangeGlobalRole(BaseModel):
+    role: GlobalRole | None
 
 
 class UserUpdate(BaseModel):

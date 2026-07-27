@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
+from pydantic import ValidationError
 from pymongo.errors import DuplicateKeyError
 from starlette.requests import Request
 
@@ -15,7 +16,6 @@ from app.api import (
     notifications,
     permissions,
     rate_limit,
-    registration,
     status,
     ticket,
 )
@@ -550,20 +550,14 @@ def test_rate_limit_proxy_duplicate_and_dependency_paths(monkeypatch):
     assert calls == [(request, {"scope": "scope", "max_requests": 3})]
 
 
-def test_register_rejects_privileged_role(monkeypatch, fake_collection):
-    monkeypatch.setattr(registration, "user_collection", fake_collection)
-    _assert_http_error(
-        lambda: registration.register(
-            UserRegister(
-                name="Admin",
-                email="admin@example.com",
-                password="secret",
-                role="admin",
-            )
-        ),
-        403,
-        " Only super admin can register an admin or agent",
-    )
+def test_register_schema_rejects_global_role():
+    with pytest.raises(ValidationError):
+        UserRegister(
+            name="Admin",
+            email="admin@example.com",
+            password="secret",
+            role="admin",
+        )
 
 
 def test_default_status_workflow_moves_colliding_orders(monkeypatch, fake_collection):

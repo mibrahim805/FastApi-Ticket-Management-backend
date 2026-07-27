@@ -16,14 +16,16 @@ A production-style Ticket Management System built with **FastAPI** and **MongoDB
 
 ---
 
-## User Roles
+## Authorization Roles
 
-- Super Admin
-- Admin
-- Agent
-- User
+There are only two global roles:
 
-Role-based authorization is implemented to restrict access to sensitive operations.
+- `super_admin` manages system-wide configuration and administrators.
+- `admin` manages user activation and system-wide reports.
+
+Ordinary accounts have no global role. Their access is determined by their
+per-project `lead`, `member`, or `reporter` membership and that project's
+permission scheme. Ticket assignees are not a separate global “agent” role.
 
 ---
 
@@ -35,6 +37,7 @@ Role-based authorization is implemented to restrict access to sensitive operatio
 - Get Project
 - List Projects
 - Manage Project Members
+- Configure Per-Project Role Permissions
 - Configure Project Workflows
 
 Each project contains:
@@ -84,6 +87,32 @@ Closed
 
 Each project can have its own workflow. A super admin or the project's lead can
 configure the project, its members, and its assigned statuses.
+
+---
+
+## Project Permission Schemes
+
+Every project starts with the standard `lead`, `member`, and `reporter`
+capabilities. A project lead or super admin can then grant or revoke capabilities
+for one role in that project without changing the same role in other projects.
+
+For example, this allows reporters to upload attachments in one project only:
+
+```http
+PUT /projects/{project_id}/permissions
+Content-Type: application/json
+
+{
+  "role": "reporter",
+  "grants": ["upload_attachments"],
+  "revocations": []
+}
+```
+
+`GET /projects/{project_id}/permissions` returns each role's defaults, overrides,
+and effective capabilities. `manage_project` cannot be overridden, preventing a
+scheme from granting project administration to another role or locking project
+leads out of configuration.
 
 ---
 

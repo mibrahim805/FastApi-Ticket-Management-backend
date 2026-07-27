@@ -136,7 +136,7 @@ def test_activate_or_deactivate_and_updates(monkeypatch, fake_collection):
 
     # success toggle
     uid2 = ObjectId()
-    users.insert_one({"_id": uid2, "role": "user", "is_active": True})
+    users.insert_one({"_id": uid2, "is_active": True})
     resp = registration.activate_or_deactivate(
         str(uid2), current_user={"role": "admin"}
     )

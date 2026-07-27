@@ -23,9 +23,10 @@ from app.api.rate_limit import (
 )
 from app.db.db import reset_tokens_collection, user_collection
 from app.models.registration import (
-    ChangeUserRole,
-    Role,
-    SuperAminRegister,
+    AdminRegister,
+    ChangeGlobalRole,
+    GlobalRole,
+    SuperAdminRegister,
     UserLogin,
     UserRegister,
     UserUpdate,
@@ -35,7 +36,7 @@ router = APIRouter(tags=["Auth"])
 
 _require_super_admin = require_role(
     *SUPER_ADMIN_ROLES,
-    detail="Only super admin can register an admin or agent",
+    detail="Only super admin can register an admin",
 )
 _require_admin = require_role(
     *ADMIN_ROLES,
@@ -48,7 +49,7 @@ _require_admin = require_role(
     tags=["Auth"],
     dependencies=[Depends(registration_rate_limit)],
 )
-def register_super_admin(user: SuperAminRegister):
+def register_super_admin(user: SuperAdminRegister):
     existing_admin = user_collection.find_one({"role": "super_admin"})
     if existing_admin:
         return {"message": "An super admin already exists."}
@@ -72,27 +73,15 @@ def register_super_admin(user: SuperAminRegister):
 )
 def register(user: UserRegister):
     existing_email = user_collection.find_one({"email": user.email})
-    allowed_users = {Role.SUPER_ADMIN.value, Role.ADMIN.value, Role.AGENT.value}
-    valid_roles = {role.value for role in Role}
 
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
-
-    if user.role not in valid_roles:
-        raise HTTPException(status_code=400, detail="Invalid role")
-
-    if user.role in allowed_users:
-        raise HTTPException(
-            status_code=403,
-            detail=" Only super admin can register an admin or agent",
-        )
 
     hashed_password = hash_password(user.password)
     user_data = {
         "name": user.name,
         "email": user.email,
         "hashed_password": hashed_password,
-        "role": user.role,
         "is_active": user.is_active,
     }
 
@@ -100,40 +89,33 @@ def register(user: UserRegister):
     return {"message": "User registered successfully"}
 
 
-@router.post("/register_admin_or_agent", tags=["Auth"])
-def register_admin_or_agent(
-    user: UserRegister,
+@router.post("/register_admin", tags=["Auth"])
+def register_admin(
+    user: AdminRegister,
     current_user: dict = Depends(_require_super_admin),
 ):
     ensure_role(
         current_user,
         SUPER_ADMIN_ROLES,
-        detail="Only super admin can register an admin or agent",
+        detail="Only super admin can register an admin",
     )
 
     existing_email = user_collection.find_one({"email": user.email})
-    allowed_roles = {Role.ADMIN.value, Role.AGENT.value}
 
     if existing_email:
         raise HTTPException(status_code=400, detail="Email already registered")
-
-    if user.role not in allowed_roles:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid role. Only 'admin' or 'agent' roles are allowed.",
-        )
 
     hashed_password = hash_password(user.password)
     user_data = {
         "name": user.name,
         "email": user.email,
         "hashed_password": hashed_password,
-        "role": user.role,
+        "role": GlobalRole.ADMIN.value,
         "is_active": user.is_active,
     }
 
     user_collection.insert_one(user_data)
-    return {"message": f"{user.role.capitalize()} registered successfully"}
+    return {"message": "Admin registered successfully"}
 
 
 @router.post(
@@ -169,7 +151,7 @@ def activate_or_deactivate(
     user = user_collection.find_one(ObjectId(user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user["role"] == "super_admin":
+    if user.get("role") == GlobalRole.SUPER_ADMIN.value:
         raise HTTPException(
             status_code=403, detail="Cannot activate or deactivate super admin"
         )
@@ -187,7 +169,7 @@ def activate_or_deactivate(
 @router.put("/change_role/{user_id}", tags=["Auth"])
 def change_user_role(
     user_id: str,
-    payload: ChangeUserRole,
+    payload: ChangeGlobalRole,
     current_user: dict = Depends(_require_super_admin),
 ):
     """Change a user's global role; project membership remains unchanged."""
@@ -204,19 +186,22 @@ def change_user_role(
     target = user_collection.find_one({"_id": target_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if target.get("role") == Role.SUPER_ADMIN.value:
+    if target.get("role") == GlobalRole.SUPER_ADMIN.value:
         raise HTTPException(status_code=403, detail="Cannot change super admin role")
-    if payload.role == Role.SUPER_ADMIN:
+    if payload.role == GlobalRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Cannot assign super admin role")
 
-    user_collection.update_one(
-        {"_id": target_id},
-        {"$set": {"role": payload.role.value}},
-    )
+    if payload.role is None:
+        user_collection.update_one({"_id": target_id}, {"$unset": {"role": ""}})
+    else:
+        user_collection.update_one(
+            {"_id": target_id},
+            {"$set": {"role": payload.role.value}},
+        )
     return {
         "message": "User role updated successfully",
         "user_id": user_id,
-        "role": payload.role.value,
+        "role": payload.role.value if payload.role else None,
     }
 
 

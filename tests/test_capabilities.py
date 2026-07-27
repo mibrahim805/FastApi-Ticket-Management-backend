@@ -8,12 +8,13 @@ from app.api.permissions import (
     Capability,
     can_assign_ticket,
     can_upload_attachment,
+    get_accessible_project_ids,
     has_capability,
     require_capability,
     transition_guard_error,
 )
 from app.models.project import ProjectRolePermissionUpdate
-from app.models.registration import ChangeUserRole
+from app.models.registration import ChangeGlobalRole
 
 
 @pytest.mark.parametrize(
@@ -154,6 +155,37 @@ def test_project_can_grant_reporter_attachment_upload(
     )
 
 
+def test_project_revocation_removes_project_from_cross_project_views(
+    fake_collection,
+):
+    visible_project_id = ObjectId()
+    hidden_project_id = ObjectId()
+    user_id = ObjectId()
+    memberships = fake_collection.__class__(
+        [
+            {
+                "project_id": visible_project_id,
+                "user_id": user_id,
+                "role": "reporter",
+            },
+            {
+                "project_id": hidden_project_id,
+                "user_id": user_id,
+                "role": "reporter",
+                "capability_revocations": [Capability.VIEW_PROJECT.value],
+            },
+        ]
+    )
+
+    assert get_accessible_project_ids(
+        {"_id": user_id, "role": "user"},
+        memberships,
+        fake_collection.__class__(
+            [{"_id": visible_project_id}, {"_id": hidden_project_id}]
+        ),
+    ) == [str(visible_project_id)]
+
+
 def test_project_permission_override_rejects_manage_project(
     monkeypatch,
     fake_collection,
@@ -196,14 +228,23 @@ def test_require_capability_rejects_missing_capability():
 
 def test_super_admin_can_change_global_role(monkeypatch, fake_collection):
     user_id = ObjectId()
-    users = fake_collection.__class__([{"_id": user_id, "role": "user"}])
+    users = fake_collection.__class__([{"_id": user_id}])
     monkeypatch.setattr(registration, "user_collection", users)
 
     response = registration.change_user_role(
         str(user_id),
-        ChangeUserRole(role="agent"),
+        ChangeGlobalRole(role="admin"),
         current_user={"_id": ObjectId(), "role": "super_admin"},
     )
 
-    assert response["role"] == "agent"
-    assert users.documents[0]["role"] == "agent"
+    assert response["role"] == "admin"
+    assert users.documents[0]["role"] == "admin"
+
+    response = registration.change_user_role(
+        str(user_id),
+        ChangeGlobalRole(role=None),
+        current_user={"_id": ObjectId(), "role": "super_admin"},
+    )
+
+    assert response["role"] is None
+    assert "role" not in users.documents[0]

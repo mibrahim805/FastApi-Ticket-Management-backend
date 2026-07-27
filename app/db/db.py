@@ -43,6 +43,7 @@ SPRINT_PROJECT_NAME_INDEX = "sprints_project_name_unique"
 SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
 TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
 TICKET_BACKLOG_ORDER_INDEX = "tickets_project_backlog_position"
+LEGACY_INERT_GLOBAL_ROLES = frozenset({"user", "customer", "agent"})
 
 
 def ensure_database_indexes() -> None:
@@ -121,6 +122,21 @@ def ensure_database_indexes() -> None:
         ],
         name=TICKET_BACKLOG_ORDER_INDEX,
     )
+
+
+def migrate_legacy_global_roles() -> int:
+    """Remove historical role labels that never granted any authorization."""
+    migrated_count = 0
+    legacy_users = user_collection.find(
+        {"role": {"$in": list(LEGACY_INERT_GLOBAL_ROLES)}}
+    )
+    for user in legacy_users:
+        user_collection.update_one(
+            {"_id": user["_id"]},
+            {"$unset": {"role": ""}},
+        )
+        migrated_count += 1
+    return migrated_count
 
 
 def migrate_legacy_workflow_transitions() -> int:

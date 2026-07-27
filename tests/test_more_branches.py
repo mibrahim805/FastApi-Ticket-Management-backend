@@ -253,28 +253,25 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
 
 
 # registration extra branches
-def test_register_admin_or_agent_cannot_create_super_admin(
-    monkeypatch, fake_collection
-):
+def test_register_admin_always_creates_admin(monkeypatch, fake_collection):
     from app.api import registration
 
     users = fake_collection.__class__()
     monkeypatch.setattr(registration, "user_collection", users)
+    monkeypatch.setattr(registration, "hash_password", lambda value: value)
 
-    payload = registration.UserRegister(
+    payload = registration.AdminRegister(
         name="X",
         email="x@example.com",
         password="p",
-        role="super_admin",
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        registration.register_admin_or_agent(
-            payload,
-            current_user={"role": "super_admin"},
-        )
+    registration.register_admin(
+        payload,
+        current_user={"role": "super_admin"},
+    )
 
-    assert exc_info.value.status_code == 400
+    assert users.documents[0]["role"] == "admin"
 
 
 def test_activate_or_deactivate_activates(monkeypatch, fake_collection):
