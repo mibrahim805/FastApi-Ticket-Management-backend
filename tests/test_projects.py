@@ -443,7 +443,11 @@ def test_update_project_handles_unique_index_race(
 
 
 def test_project_lead_and_super_admin_can_add_members(
-    monkeypatch, fake_collection, project_members, grant_project_role
+    monkeypatch,
+    fake_collection,
+    project_members,
+    project_activities,
+    grant_project_role,
 ):
     project_id = ObjectId()
     lead_id = ObjectId()
@@ -476,6 +480,10 @@ def test_project_lead_and_super_admin_can_add_members(
     }
     assert roles_by_user[member_id] == "member"
     assert roles_by_user[admin_added_id] == "reporter"
+    assert [activity["action"] for activity in project_activities.documents] == [
+        "project_member_added",
+        "project_member_added",
+    ]
 
 
 def test_project_response_hides_retired_fields(

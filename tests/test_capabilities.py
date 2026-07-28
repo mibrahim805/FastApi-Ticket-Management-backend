@@ -2,7 +2,7 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.api import project, registration
+from app.api import project, registration, ticket
 from app.api.permissions import (
     ROLE_CAPABILITIES,
     Capability,
@@ -98,6 +98,7 @@ def test_project_can_grant_reporter_attachment_upload(
     monkeypatch,
     fake_collection,
     project_members,
+    project_activities,
 ):
     project_a_id = ObjectId()
     project_b_id = ObjectId()
@@ -153,6 +154,8 @@ def test_project_can_grant_reporter_attachment_upload(
         reporter,
         project_b_reporter,
     )
+    assert project_activities.documents[-1]["action"] == ("project_permissions_updated")
+    assert project_activities.documents[-1]["changes"][0]["role"] == "reporter"
 
 
 def test_project_revocation_removes_project_from_cross_project_views(
@@ -224,6 +227,77 @@ def test_require_capability_rejects_missing_capability():
         )
 
     assert exc_info.value.status_code == 403
+
+
+def test_project_capabilities_endpoint_returns_current_users_effective_access(
+    monkeypatch, fake_collection, project_members
+):
+    project_id = ObjectId()
+    user_id = ObjectId()
+    monkeypatch.setattr(
+        project,
+        "projects_collection",
+        fake_collection.__class__([{"_id": project_id}]),
+    )
+    project_members.insert_one(
+        {
+            "project_id": project_id,
+            "user_id": user_id,
+            "role": "reporter",
+            "capability_grants": [Capability.UPDATE_TICKET.value],
+        }
+    )
+
+    response = project.get_project_capabilities(
+        str(project_id), current_user={"_id": user_id, "role": "customer"}
+    )
+
+    assert response["role"] == "reporter"
+    assert Capability.UPDATE_TICKET.value in response["capabilities"]
+    assert response["can"][Capability.UPDATE_TICKET.value] is True
+    assert response["can"][Capability.DELETE_TICKETS.value] is False
+
+
+def test_ticket_capabilities_endpoint_includes_ticket_actor_permissions(
+    monkeypatch, fake_collection, project_members
+):
+    project_id = ObjectId()
+    ticket_id = ObjectId()
+    user_id = ObjectId()
+    monkeypatch.setattr(
+        ticket,
+        "projects_collection",
+        fake_collection.__class__([{"_id": project_id}]),
+    )
+    monkeypatch.setattr(
+        ticket,
+        "ticket_collection",
+        fake_collection.__class__(
+            [
+                {
+                    "_id": ticket_id,
+                    "project_id": str(project_id),
+                    "userId": str(user_id),
+                    "assigned_agent": None,
+                }
+            ]
+        ),
+    )
+    project_members.insert_one(
+        {"project_id": project_id, "user_id": user_id, "role": "reporter"}
+    )
+
+    response = ticket.get_ticket_capabilities(
+        str(ticket_id), current_user={"_id": user_id, "role": "customer"}
+    )
+
+    assert response["capabilities"]
+    assert response["context"] == {
+        "is_creator": True,
+        "is_assignee": False,
+        "can_upload_attachments": True,
+    }
+    assert response["can"][Capability.UPLOAD_ATTACHMENTS.value] is True
 
 
 def test_super_admin_can_change_global_role(monkeypatch, fake_collection):

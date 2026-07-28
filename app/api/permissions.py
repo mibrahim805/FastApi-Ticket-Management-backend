@@ -6,12 +6,47 @@ from bson.errors import InvalidId
 from fastapi import Depends, HTTPException
 
 from app.api.auth import get_current_user
+from app.db.db import (
+    project_permission_overrides_collection,
+)
+from app.models.permission import (
+    DEFAULT_PROJECT_ROLE_PERMISSIONS,
+    Permission,
+)
 from app.models.project_member import ProjectRole
 from app.models.registration import GlobalRole
 
 SUPER_ADMIN_ROLES = frozenset({GlobalRole.SUPER_ADMIN.value})
 ADMIN_ROLES = frozenset({GlobalRole.ADMIN.value, GlobalRole.SUPER_ADMIN.value})
 PROJECT_MEMBER_ROLES = frozenset(role.value for role in ProjectRole)
+
+
+def role_has_permission(
+    role: str,
+    permission: Permission,
+    project_id: str | ObjectId | None = None,
+) -> bool:
+    """Return whether a role has a permission, including project overrides."""
+    try:
+        role = ProjectRole(role)
+        permission = Permission(permission)
+    except ValueError:
+        return False
+
+    default_permissions = DEFAULT_PROJECT_ROLE_PERMISSIONS.get(role, frozenset())
+    if project_id is None:
+        return permission in default_permissions
+
+    override = project_permission_overrides_collection.find_one(
+        {"project_id": parse_object_id(project_id, "project_id"), "role": role.value}
+    )
+    if not override:
+        return permission in default_permissions
+    if permission.value in set(override.get("removed") or []):
+        return False
+    if permission.value in set(override.get("added") or []):
+        return True
+    return permission in default_permissions
 
 
 class Capability(str, Enum):
@@ -121,6 +156,11 @@ def has_capability(membership: dict | None, capability: Capability | str) -> boo
     return capability in effective_capabilities(membership)
 
 
+def serialize_capabilities(membership: dict | None) -> list[str]:
+    """Return effective capabilities in the stable format used by the API."""
+    return sorted(capability.value for capability in effective_capabilities(membership))
+
+
 def can_upload_attachment(
     ticket: dict,
     current_user: dict,
@@ -220,6 +260,32 @@ def require_project_capability(
         allow_super_admin=allow_super_admin,
     )
     return require_capability(membership, capability, detail=detail)
+
+
+def require_project_permission(
+    project_id: str | ObjectId,
+    current_user: dict,
+    project_members_collection,
+    permission: Permission,
+    *,
+    permission_detail: str | None = None,
+    allow_super_admin: bool = False,
+) -> dict:
+    """Require a named permission after resolving project membership."""
+    membership = require_project_membership(
+        project_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=allow_super_admin,
+    )
+    if membership.get("role") != "super_admin" and not role_has_permission(
+        membership["role"], permission, project_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=permission_detail or f"Missing permission: {permission.value}",
+        )
+    return membership
 
 
 def require_ticket_capability(

@@ -221,6 +221,11 @@ def ticket_activities(fake_collection):
 
 
 @pytest.fixture
+def project_activities(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def notification_preferences(fake_collection):
     return fake_collection.__class__()
 
@@ -370,3 +375,20 @@ def isolate_ticket_activity_collection(monkeypatch, ticket_activities):
         )
 
     return ticket_activities
+
+
+@pytest.fixture(autouse=True)
+def isolate_project_activity_collection(monkeypatch, project_activities):
+    for module_name in (
+        "app.db.db",
+        "app.api.activity",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "project_activity_collection"):
+            monkeypatch.setattr(
+                module,
+                "project_activity_collection",
+                project_activities,
+            )
+
+    return project_activities

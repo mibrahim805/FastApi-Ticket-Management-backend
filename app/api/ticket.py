@@ -14,11 +14,13 @@ from app.api.notification_delivery import create_notification
 from app.api.permissions import (
     Capability,
     can_assign_ticket,
+    can_upload_attachment,
     get_accessible_project_ids,
     get_project_membership,
     has_capability,
     require_project_membership,
     require_ticket_membership,
+    serialize_capabilities,
     transition_guard_error,
 )
 from app.api.watcher_notifications import notify_ticket_watchers
@@ -681,6 +683,46 @@ def get_ticket_transitions(
             }
         )
     return {"transitions": transitions}
+
+
+@router.get("/tickets/{ticket_id}/capabilities", tags=["Tickets"])
+def get_ticket_capabilities(
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return effective and ticket-contextual capabilities for the current user."""
+    _, ticket = _get_ticket_or_404(ticket_id)
+    project_object_id, _ = _get_ticket_project(ticket)
+    membership = require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+        capability=Capability.VIEW_TICKET,
+    )
+
+    capabilities = set(serialize_capabilities(membership))
+    can_upload = can_upload_attachment(ticket, current_user, membership)
+    if can_upload:
+        capabilities.add(Capability.UPLOAD_ATTACHMENTS.value)
+
+    capability_values = sorted(capabilities)
+    user_id = str(current_user.get("_id"))
+    return {
+        "ticket_id": str(ticket["_id"]),
+        "project_id": str(project_object_id),
+        "role": membership.get("role"),
+        "capabilities": capability_values,
+        "can": {
+            capability.value: capability.value in capabilities
+            for capability in Capability
+        },
+        "context": {
+            "is_creator": user_id == str(ticket.get("userId")),
+            "is_assignee": user_id == str(ticket.get("assigned_agent")),
+            "can_upload_attachments": can_upload,
+        },
+    }
 
 
 @router.post("/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])

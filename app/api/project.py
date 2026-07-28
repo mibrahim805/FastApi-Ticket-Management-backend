@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
 
+from app.api.activity import log_project_activity
 from app.api.auth import get_current_user
 from app.api.permissions import (
     ROLE_CAPABILITIES,
@@ -14,6 +15,8 @@ from app.api.permissions import (
     parse_object_id,
     require_project_membership,
     require_role,
+    role_has_permission,
+    serialize_capabilities,
 )
 from app.db.db import (
     project_members_collection,
@@ -24,6 +27,7 @@ from app.db.db import (
     transitions_collection,
     user_collection,
 )
+from app.models.permission import Permission
 from app.models.project import (
     ProjectCreate,
     ProjectMemberRole,
@@ -127,6 +131,19 @@ def create_project(
             "role": ProjectMemberRole.LEAD.value,
         }
     )
+    log_project_activity(
+        project_id=str(result.inserted_id),
+        action="project_created",
+        changed_by=current_user_id,
+        changes=[
+            {
+                "field": "member_role",
+                "user_id": str(current_user_id),
+                "old_value": None,
+                "new_value": ProjectMemberRole.LEAD.value,
+            }
+        ],
+    )
 
     return {"id": str(result.inserted_id), "message": "Project created"}
 
@@ -226,6 +243,63 @@ def get_project_permissions(
     return _serialize_project_permissions(project)
 
 
+@router.get("/{project_id}/capabilities")
+def get_project_capabilities(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the authenticated user's effective capabilities for a project."""
+    project_object_id, _ = _get_project_or_404(project_id)
+    membership = require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
+    )
+    capabilities = serialize_capabilities(membership)
+    return {
+        "project_id": str(project_object_id),
+        "role": membership.get("role"),
+        "capabilities": capabilities,
+        "can": {
+            capability.value: capability.value in capabilities
+            for capability in Capability
+        },
+    }
+
+
+@router.get("/{project_id}/my-permissions")
+def get_my_project_permissions(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the named permissions granted to the authenticated user."""
+    project_object_id, _ = _get_project_or_404(project_id)
+    membership = require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
+    )
+
+    role = membership.get("role")
+    permissions = (
+        frozenset(Permission)
+        if role == "super_admin"
+        else frozenset(
+            permission
+            for permission in Permission
+            if role_has_permission(role, permission, project_object_id)
+        )
+    )
+    return {
+        "role": role,
+        "permissions": sorted(permission.value for permission in permissions),
+    }
+
+
 @router.put("/{project_id}/permissions")
 def update_project_permissions(
     project_id: str,
@@ -259,6 +333,7 @@ def update_project_permissions(
         )
 
     role = payload.role.value
+    previous_override = _permission_override(project, role)
     overrides = dict(project.get("permission_overrides") or {})
     overrides[role] = {
         "grants": sorted(payload.grants),
@@ -283,6 +358,19 @@ def update_project_permissions(
         )
 
     updated_project = {**project, "permission_overrides": overrides}
+    log_project_activity(
+        project_id=str(project_object_id),
+        action="project_permissions_updated",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "role_permissions",
+                "role": role,
+                "old_value": previous_override,
+                "new_value": overrides[role],
+            }
+        ],
+    )
     return _serialize_project_permissions(updated_project)
 
 
@@ -540,6 +628,25 @@ def add_project_member(
             "capability_grants": override["grants"],
             "capability_revocations": override["revocations"],
         }
+    )
+    log_project_activity(
+        project_id=str(project_object_id),
+        action="project_member_added",
+        changed_by=current_user["_id"],
+        changes=[
+            {
+                "field": "member_role",
+                "user_id": str(member_user_id),
+                "old_value": None,
+                "new_value": member.role.value,
+            },
+            {
+                "field": "member_capability_overrides",
+                "user_id": str(member_user_id),
+                "old_value": None,
+                "new_value": override,
+            },
+        ],
     )
     return {
         "id": str(result.inserted_id),
