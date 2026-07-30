@@ -4,7 +4,14 @@ from app.models.project_member import ProjectRole
 
 
 class Permission(str, Enum):
-    """Named permissions granted to project roles."""
+    """Legacy project-role permissions exposed by the project permissions API.
+
+    ``Capability`` in :mod:`app.api.permissions` is the runtime authorization
+    vocabulary for endpoints.  These enums intentionally remain separate:
+    permissions describe configurable role grants, while capabilities also
+    include endpoint-specific and contextual actions (for example ticket
+    transitions and attachment exceptions).
+    """
 
     # Project management
     VIEW_PROJECT = "view_project"
