@@ -33,6 +33,13 @@ async def lifespan(_: FastAPI):
 # from uploads import ticket_attachment
 app = FastAPI(lifespan=lifespan)
 
+
+@app.get("/health", tags=["health"])
+async def health() -> dict[str, str]:
+    """Report that the API process is running."""
+    return {"status": "ok"}
+
+
 app.include_router(registration.router)
 app.include_router(project.router)
 app.include_router(ticket.router)

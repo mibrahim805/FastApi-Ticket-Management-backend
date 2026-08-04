@@ -2,6 +2,11 @@ services:
   api:
     build:
       context: .
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     ports:
       - "8000:8000"
     environment:
@@ -22,7 +27,8 @@ services:
     restart: unless-stopped
 
   mongo:
-    image: mongo:7
+    # MongoDB 7.0.16 is pinned to keep rebuilds reproducible.
+    image: mongo:7.0.16
     volumes:
       - mongo_data:/data/db
     healthcheck:
