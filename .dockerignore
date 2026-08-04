@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+.idea
+.codex
+.agents
+uploads/tickets
+tests
+README.md
+test_main.http

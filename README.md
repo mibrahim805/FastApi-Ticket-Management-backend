@@ -114,6 +114,12 @@ and effective capabilities. `manage_project` cannot be overridden, preventing a
 scheme from granting project administration to another role or locking project
 leads out of configuration.
 
+The legacy `Permission` enum and runtime `Capability` enum are intentionally
+separate. `Permission` describes configurable role grants exposed by the
+project-permissions API, while `Capability` is the endpoint authorization
+vocabulary and also covers contextual actions such as ticket transitions and
+attachment exceptions.
+
 ---
 
 ## Ticket Management
@@ -205,6 +211,19 @@ Password Hashing
 ODM
 
 - PyMongo
+
+## Docker
+
+Docker Compose starts the API and MongoDB together:
+
+```bash
+docker compose up --build
+```
+
+The API is available at `http://localhost:8000`, with OpenAPI documentation at
+`http://localhost:8000/docs`. Set `SECRET_KEY` in the environment before
+starting Compose for anything beyond local development. MongoDB data and local
+attachments use named Docker volumes and survive container restarts.
 
 ---
 
