@@ -593,6 +593,12 @@ Install dependencies
 pip install -r requirements.txt
 ```
 
+Install the Git hooks once for this clone:
+
+```bash
+pre-commit install
+```
+
 ---
 
 # 🔑 Environment Variables
