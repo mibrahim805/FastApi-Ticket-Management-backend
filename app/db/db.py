@@ -28,6 +28,7 @@ project_members_collection = db["project_members"]
 project_permission_overrides_collection = db["project_permission_overrides"]
 issue_links_collection = db["issue_links"]
 transitions_collection = db["transitions"]
+project_components_collection = db["project_components"]
 sprints_collection = db["sprints"]
 
 

@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from app.api.activity import log_project_activity
@@ -19,6 +20,7 @@ from app.api.permissions import (
     serialize_capabilities,
 )
 from app.db.db import (
+    project_components_collection,
     project_members_collection,
     projects_collection,
     sprints_collection,
@@ -36,7 +38,20 @@ from app.models.project import (
     ProjectUpdate,
 )
 from app.models.project_member import ProjectMemberCreate
-from app.models.transition import ProjectWorkflowUpdate
+from app.models.transition import (
+    ProjectWorkflowUpdate,
+    TransitionCreate,
+    TransitionPatch,
+)
+
+
+class ComponentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class ComponentUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -398,6 +413,87 @@ def get_project_workflow(
     }
 
 
+@router.get("/{project_id}/components")
+def list_project_components(
+    project_id: str, current_user: dict = Depends(get_current_user)
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+    )
+    return [
+        {**item, "_id": str(item["_id"])}
+        for item in project_components_collection.find(
+            {"project_id": project_object_id}
+        ).sort("name", 1)
+    ]
+
+
+@router.post("/{project_id}/components", status_code=201)
+def create_project_component(
+    project_id: str,
+    payload: ComponentCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    name = payload.name.strip()
+    if project_components_collection.find_one(
+        {"project_id": project_object_id, "name_key": name.lower()}
+    ):
+        raise HTTPException(status_code=409, detail="Component already exists")
+    item = {
+        "project_id": project_object_id,
+        "name": name,
+        "name_key": name.lower(),
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = project_components_collection.insert_one(item)
+    item["_id"] = str(result.inserted_id)
+    return item
+
+
+@router.patch("/{project_id}/components/{component_id}")
+def update_project_component(
+    project_id: str,
+    component_id: str,
+    payload: ComponentUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    component_object_id = parse_object_id(component_id, "component_id")
+    name = payload.name.strip()
+    item = project_components_collection.find_one(
+        {"_id": component_object_id, "project_id": project_object_id}
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Component not found")
+    project_components_collection.update_one(
+        {"_id": component_object_id}, {"$set": {"name": name, "name_key": name.lower()}}
+    )
+    return {**item, "_id": component_id, "name": name, "name_key": name.lower()}
+
+
+@router.delete("/{project_id}/components/{component_id}", status_code=204)
+def delete_project_component(
+    project_id: str, component_id: str, current_user: dict = Depends(get_current_user)
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    result = project_components_collection.delete_one(
+        {
+            "_id": parse_object_id(component_id, "component_id"),
+            "project_id": project_object_id,
+        }
+    )
+    if not result.deleted_count:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+
 @router.put("/{project_id}/workflow")
 def configure_project_workflow(
     project_id: str,
@@ -473,6 +569,99 @@ def configure_project_workflow(
         },
     )
     return {"project_id": project_id, "transitions": stored_transitions}
+
+
+def _validate_transition(project: dict, payload: TransitionCreate) -> dict:
+    assigned = {str(value) for value in project.get("assigned_statuses", [])}
+    sources = [
+        str(parse_object_id(value, "status_id")) for value in payload.from_status_ids
+    ]
+    target = str(parse_object_id(payload.to_status_id, "status_id"))
+    if len(sources) != len(set(sources)):
+        raise HTTPException(
+            status_code=400, detail="Transition source status IDs must be unique"
+        )
+    for status_id in [*sources, target]:
+        if status_id not in assigned:
+            raise HTTPException(
+                status_code=400,
+                detail="Transition status is not assigned to this project",
+            )
+        if not statuses_collection.find_one(
+            {"_id": parse_object_id(status_id, "status_id")}
+        ):
+            raise HTTPException(
+                status_code=404, detail=f"Workflow status '{status_id}' not found"
+            )
+    document = payload.model_dump(mode="json")
+    document["project_id"] = project["_id"]
+    document["from_status_ids"] = sources
+    document["to_status_id"] = target
+    document["guard"]["allowed_roles"] = list(
+        dict.fromkeys(document["guard"]["allowed_roles"])
+    )
+    return document
+
+
+@router.post("/{project_id}/workflow/transitions", status_code=201)
+def add_workflow_transition(
+    project_id: str,
+    payload: TransitionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    document = _validate_transition(project, payload)
+    document.update(
+        {
+            "order": transitions_collection.count_documents(
+                {"project_id": project_object_id}
+            ),
+            "created_at": datetime.now(timezone.utc),
+            "created_by": str(current_user["_id"]),
+        }
+    )
+    result = transitions_collection.insert_one(document)
+    document["_id"] = result.inserted_id
+    return _serialize_transition(document)
+
+
+@router.patch("/{project_id}/workflow/transitions/{transition_id}")
+def edit_workflow_transition(
+    project_id: str,
+    transition_id: str,
+    payload: TransitionPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    transition_object_id = parse_object_id(transition_id, "transition_id")
+    existing = transitions_collection.find_one(
+        {"_id": transition_object_id, "project_id": project_object_id}
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Workflow transition not found")
+    merged = {**existing, **payload.model_dump(exclude_none=True)}
+    document = _validate_transition(project, TransitionCreate.model_validate(merged))
+    transitions_collection.update_one({"_id": transition_object_id}, {"$set": document})
+    document["_id"] = transition_object_id
+    return _serialize_transition(document)
+
+
+@router.delete("/{project_id}/workflow/transitions/{transition_id}", status_code=204)
+def delete_workflow_transition(
+    project_id: str, transition_id: str, current_user: dict = Depends(get_current_user)
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    result = transitions_collection.delete_one(
+        {
+            "_id": parse_object_id(transition_id, "transition_id"),
+            "project_id": project_object_id,
+        }
+    )
+    if not result.deleted_count:
+        raise HTTPException(status_code=404, detail="Workflow transition not found")
 
 
 @router.put("/{project_id}")

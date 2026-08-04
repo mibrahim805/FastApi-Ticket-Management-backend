@@ -431,6 +431,7 @@ def require_ticket_membership(
     *,
     capability: Capability | str | None = None,
     role_detail: str = "You do not have permission to perform this ticket action",
+    allow_super_admin: bool = True,
 ) -> dict:
     project_id = ticket.get("project_id")
     if not project_id:
@@ -442,6 +443,7 @@ def require_ticket_membership(
         project_members_collection,
         capability=capability,
         role_detail=role_detail,
+        allow_super_admin=allow_super_admin,
     )
 
 
@@ -461,6 +463,10 @@ def require_ticket_participant(
             ticket,
             current_user,
             project_members_collection,
+            # Participant visibility still honors an existing project role;
+            # the legacy fallback below preserves super-admin access when no
+            # membership exists.
+            allow_super_admin=False,
         )
     except HTTPException as error:
         is_missing_membership = (

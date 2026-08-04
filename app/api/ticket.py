@@ -76,7 +76,9 @@ def _serialize_ticket(ticket: dict) -> dict:
         serialized["_id"] = str(serialized["_id"])
     serialized.setdefault("issue_type", IssueType.TASK.value)
     serialized.setdefault("epic_id", None)
+    serialized.setdefault("parent_id", None)
     serialized.setdefault("labels", [])
+    serialized.setdefault("components", [])
     serialized.setdefault("watchers", [])
     serialized.setdefault("sprint_id", None)
     serialized.setdefault("story_points", None)
@@ -419,6 +421,24 @@ def create_ticket(
             )
         epic_id = str(epic_object_id)
 
+    parent_id = None
+    if payload.parent_id is not None:
+        if payload.issue_type != IssueType.SUBTASK:
+            raise HTTPException(
+                status_code=400,
+                detail="Only subtasks can have a parent issue",
+            )
+        parent_object_id = _parse_object_id(payload.parent_id, "parent_id")
+        parent = ticket_collection.find_one({"_id": parent_object_id})
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent issue not found")
+        if str(parent.get("project_id")) != str(project["_id"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Parent issue must belong to the same project as the subtask",
+            )
+        parent_id = str(parent_object_id)
+
     assigned_statuses = project.get("assigned_statuses", [])
     if not assigned_statuses:
         raise HTTPException(
@@ -455,7 +475,9 @@ def create_ticket(
         "category": payload.category.value,
         "issue_type": payload.issue_type.value,
         "epic_id": epic_id,
+        "parent_id": parent_id,
         "labels": list(payload.labels),
+        "components": list(payload.components),
         "watchers": [],
         "sprint_id": None,
         "story_points": payload.story_points,
@@ -879,6 +901,23 @@ def update_ticket(
     if not update_data:
         raise HTTPException(status_code=400, detail="No ticket fields supplied")
 
+    if "parent_id" in update_data:
+        if ticket.get("issue_type") != IssueType.SUBTASK.value:
+            raise HTTPException(
+                status_code=400,
+                detail="Only subtasks can have a parent issue",
+            )
+        parent_object_id = _parse_object_id(update_data["parent_id"], "parent_id")
+        parent = ticket_collection.find_one({"_id": parent_object_id})
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent issue not found")
+        if str(parent.get("project_id")) != str(ticket.get("project_id")):
+            raise HTTPException(
+                status_code=400,
+                detail="Parent issue must belong to the same project as the subtask",
+            )
+        update_data["parent_id"] = str(parent_object_id)
+
     if "story_points" in update_data and ticket.get("sprint_id"):
         sprint = sprints_collection.find_one(
             {"_id": _parse_object_id(ticket["sprint_id"], "sprint_id")}
@@ -1096,6 +1135,7 @@ def _build_ticket_list_query(
     assigned_agent: Optional[str],
     search: Optional[str],
     overdue_only: Optional[bool],
+    components: Optional[List[str]] = None,
 ) -> dict:
     if len(project_ids) == 1:
         query = {"project_id": project_ids[0]}
@@ -1115,6 +1155,8 @@ def _build_ticket_list_query(
             query["issue_type"] = issue_type.value
     if labels:
         query["labels"] = {"$all": list(dict.fromkeys(labels))}
+    if components:
+        query["components"] = {"$all": list(dict.fromkeys(components))}
     if epic_id:
         query["epic_id"] = str(_parse_object_id(epic_id, "epic_id"))
     if assigned_agent:
@@ -1195,6 +1237,7 @@ def _ticket_filters_applied(
     overdue_only: Optional[bool],
     sort_by: Optional[str],
     sort_order: Optional[str],
+    components: Optional[List[str]] = None,
 ) -> dict:
     return {
         "status": status,
@@ -1202,6 +1245,7 @@ def _ticket_filters_applied(
         "category": category,
         "issue_type": issue_type.value if issue_type else None,
         "labels": labels,
+        "components": components,
         "epic_id": epic_id,
         "assigned_agent": assigned_agent,
         "search": search,
@@ -1229,6 +1273,14 @@ def search_tickets(
     labels: Annotated[
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
+    ] = None,
+    components: Annotated[
+        Optional[List[str]],
+        Query(
+            description=(
+                "Filter by all supplied components; repeat for multiple components"
+            )
+        ),
     ] = None,
     epic_id: Annotated[
         Optional[str],
@@ -1267,6 +1319,7 @@ def search_tickets(
         category=category,
         issue_type=issue_type,
         labels=labels,
+        components=components,
         epic_id=epic_id,
         assigned_agent=assigned_agent,
         search=search,
@@ -1319,6 +1372,14 @@ def get_tickets(
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
     ] = None,
+    components: Annotated[
+        Optional[List[str]],
+        Query(
+            description=(
+                "Filter by all supplied components; repeat for multiple components"
+            )
+        ),
+    ] = None,
     epic_id: Annotated[
         Optional[str],
         Query(description="Filter by parent epic ID"),
@@ -1360,6 +1421,7 @@ def get_tickets(
         category=category,
         issue_type=issue_type,
         labels=labels,
+        components=components,
         epic_id=epic_id,
         assigned_agent=assigned_agent,
         search=search,

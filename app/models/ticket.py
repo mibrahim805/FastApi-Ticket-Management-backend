@@ -56,7 +56,12 @@ class Ticket(BaseModel):
     category: Category
     issue_type: IssueType = IssueType.TASK
     epic_id: Optional[str] = None
+    parent_id: Optional[str] = Field(
+        default=None,
+        description="ID of the parent issue for a subtask",
+    )
     labels: List[str] = Field(default_factory=list)
+    components: List[str] = Field(default_factory=list)
     watchers: List[str] = Field(default_factory=list)
     sprint_id: Optional[str] = None
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
@@ -85,7 +90,12 @@ class TicketCreate(BaseModel):
         default=None,
         description="ID of the epic that contains this issue",
     )
+    parent_id: Optional[str] = Field(
+        default=None,
+        description="ID of the parent issue for a subtask",
+    )
     labels: List[str] = Field(default_factory=list)
+    components: List[str] = Field(default_factory=list)
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     priority: Priority
     # created_at: datetime = datetime.now()
@@ -100,6 +110,8 @@ class TicketUpdate(BaseModel):
     priority: Optional[str] = None
     category: Optional[str] = None
     labels: Optional[List[str]] = None
+    components: Optional[List[str]] = None
+    parent_id: Optional[str] = None
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     due_date: Optional[datetime] = None
 
