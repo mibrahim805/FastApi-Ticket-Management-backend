@@ -439,6 +439,7 @@ def list_project_components(
         current_user,
         project_members_collection,
         allow_super_admin=True,
+        capability=Capability.VIEW_PROJECT,
     )
     return [
         _serialize_component(item)

@@ -14,6 +14,7 @@ from app.api.permissions import (
     ADMIN_ROLES,
     SUPER_ADMIN_ROLES,
     ensure_role,
+    parse_object_id,
     require_role,
 )
 from app.api.rate_limit import (
@@ -128,10 +129,10 @@ def register_admin(
 )
 def login(user: UserLogin):
     db_user = user_collection.find_one({"email": user.email})
-    if not db_user:
-        raise HTTPException(status_code=401, detail="Email is not registered")
-    if not verify_password(user.password, db_user["hashed_password"]):
-        raise HTTPException(status_code=401, detail="Wrong password")
+    if not db_user or not verify_password(
+        user.password, db_user.get("hashed_password", "")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     if not db_user["is_active"]:
         raise HTTPException(
             status_code=401,
@@ -156,7 +157,8 @@ def activate_or_deactivate(
         ADMIN_ROLES,
         detail="Only super admin or admin can activate or deactivate users",
     )
-    user = user_collection.find_one(ObjectId(user_id))
+    target_id = parse_object_id(user_id, "user_id")
+    user = user_collection.find_one({"_id": target_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.get("role") == GlobalRole.SUPER_ADMIN.value:
@@ -165,7 +167,7 @@ def activate_or_deactivate(
         )
 
     user_collection.update_one(
-        {"_id": ObjectId(user_id)}, {"$set": {"is_active": not user["is_active"]}}
+        {"_id": target_id}, {"$set": {"is_active": not user["is_active"]}}
     )
 
     if user["is_active"]:
