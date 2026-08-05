@@ -1,5 +1,5 @@
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.params import Depends
 
 from app.api.auth import (
@@ -25,7 +25,10 @@ from app.db.db import reset_tokens_collection, user_collection
 from app.models.registration import (
     AdminRegister,
     ChangeGlobalRole,
+    ChangePasswordRequest,
     GlobalRole,
+    PasswordResetRequest,
+    ResetPasswordRequest,
     SuperAdminRegister,
     UserLogin,
     UserRegister,
@@ -134,7 +137,12 @@ def login(user: UserLogin):
             status_code=401,
             detail="Your account has been deactivated. Please contact support.",
         )
-    access_token = create_access_token({"sub": str(db_user["_id"])})
+    access_token = create_access_token(
+        {
+            "sub": str(db_user["_id"]),
+            "token_version": db_user.get("token_version", 0),
+        }
+    )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -214,6 +222,7 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
 
     if "password" in update_data:
         update_data["hashed_password"] = hash_password(update_data.pop("password"))
+        update_data["token_version"] = db_user.get("token_version", 0) + 1
 
     user_collection.update_one({"_id": db_user["_id"]}, {"$set": update_data})
     return {"message": "User updated successfully"}
@@ -221,8 +230,16 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
 
 @router.put("/change_password/", tags=["Auth"])
 def change_password(
-    old_password: str, new_password: str, current_user: dict = Depends(get_current_user)
+    payload: ChangePasswordRequest | str = Body(...),
+    new_password: str | None = Body(default=None),
+    current_user: dict = Depends(get_current_user),
 ):
+    if isinstance(payload, ChangePasswordRequest):
+        old_password, new_password = payload.old_password, payload.new_password
+    else:
+        old_password = payload
+    if old_password is None or new_password is None:
+        raise HTTPException(status_code=422, detail="Password fields are required")
     db_user = user_collection.find_one(ObjectId(current_user["_id"]))
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -235,7 +252,13 @@ def change_password(
         )
     hashed_new_password = hash_password(new_password)
     user_collection.update_one(
-        {"_id": db_user["_id"]}, {"$set": {"hashed_password": hashed_new_password}}
+        {"_id": db_user["_id"]},
+        {
+            "$set": {
+                "hashed_password": hashed_new_password,
+                "token_version": db_user.get("token_version", 0) + 1,
+            }
+        },
     )
     return {"message": "Password changed successfully"}
 
@@ -244,7 +267,10 @@ def change_password(
     "/request-password-reset",
     dependencies=[Depends(password_reset_rate_limit)],
 )
-def request_password_reset(email: str):
+def request_password_reset(
+    payload: PasswordResetRequest | str = Body(...),
+):
+    email = payload.email if isinstance(payload, PasswordResetRequest) else payload
     user = user_collection.find_one({"email": email})
 
     if not user:
@@ -261,7 +287,18 @@ def request_password_reset(email: str):
     "/reset-password",
     dependencies=[Depends(password_reset_rate_limit)],
 )
-def reset_password(token: str, new_password: str):
+def reset_password(
+    payload: ResetPasswordRequest | str = Body(...),
+    new_password: str | None = Body(default=None),
+):
+    if isinstance(payload, ResetPasswordRequest):
+        token, new_password = payload.token, payload.new_password
+    else:
+        token = payload
+    if token is None or new_password is None:
+        raise HTTPException(
+            status_code=422, detail="Token and new_password are required"
+        )
     record = verify_password_reset_token(reset_tokens_collection, token)
 
     if not record:
@@ -271,7 +308,15 @@ def reset_password(token: str, new_password: str):
 
     user_collection.update_one(
         {"_id": ObjectId(record["user_id"])},
-        {"$set": {"hashed_password": hashed_password}},
+        {
+            "$set": {
+                "hashed_password": hashed_password,
+                "token_version": user_collection.find_one(
+                    {"_id": ObjectId(record["user_id"])}
+                ).get("token_version", 0)
+                + 1,
+            }
+        },
     )
     reset_tokens_collection.update_one({"token": token}, {"$set": {"used": True}})
 

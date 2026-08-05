@@ -30,6 +30,11 @@ def get_current_user(token: HTTPAuthorizationCredentials = Depends(security_sche
     user = user_collection.find_one({"_id": ObjectId(user_id)})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.get("is_active") is False:
+        raise HTTPException(status_code=401, detail="User account is deactivated")
+    token_version = payload.get("token_version", 0)
+    if token_version != user.get("token_version", 0):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     return user
 
 

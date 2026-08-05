@@ -41,9 +41,17 @@ class ChangeGlobalRole(BaseModel):
 class UserUpdate(BaseModel):
     name: str
     password: str
-    is_active: bool
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr

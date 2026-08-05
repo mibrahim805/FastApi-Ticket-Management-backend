@@ -10,7 +10,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      SECRET_KEY: ${SECRET_KEY:-docker-development-secret-key-change-me-32chars}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set explicitly}
       MONGO_URI: mongodb://mongo:27017
       MONGO_DB_NAME: ${MONGO_DB_NAME:-mydatabase}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
