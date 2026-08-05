@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timezone
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
@@ -51,6 +52,21 @@ class ComponentCreate(BaseModel):
 
 class ComponentUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+
+
+def _serialize_component(component: dict) -> dict:
+    def convert(value):
+        if isinstance(value, ObjectId):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if isinstance(value, tuple):
+            return [convert(item) for item in value]
+        return value
+
+    return convert(component)
 
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -425,7 +441,7 @@ def list_project_components(
         allow_super_admin=True,
     )
     return [
-        {**item, "_id": str(item["_id"])}
+        _serialize_component(item)
         for item in project_components_collection.find(
             {"project_id": project_object_id}
         ).sort("name", 1)
@@ -452,8 +468,8 @@ def create_project_component(
         "created_at": datetime.now(timezone.utc),
     }
     result = project_components_collection.insert_one(item)
-    item["_id"] = str(result.inserted_id)
-    return item
+    item["_id"] = result.inserted_id
+    return _serialize_component(item)
 
 
 @router.patch("/{project_id}/components/{component_id}")
@@ -472,10 +488,20 @@ def update_project_component(
     )
     if not item:
         raise HTTPException(status_code=404, detail="Component not found")
+    duplicate = project_components_collection.find_one(
+        {
+            "project_id": project_object_id,
+            "name_key": name.lower(),
+            "_id": {"$ne": component_object_id},
+        }
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Component already exists")
     project_components_collection.update_one(
         {"_id": component_object_id}, {"$set": {"name": name, "name_key": name.lower()}}
     )
-    return {**item, "_id": component_id, "name": name, "name_key": name.lower()}
+    item.update({"name": name, "name_key": name.lower()})
+    return _serialize_component(item)
 
 
 @router.delete("/{project_id}/components/{component_id}", status_code=204)
