@@ -1,6 +1,6 @@
 import enum
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class GlobalRole(str, enum.Enum):
@@ -13,7 +13,7 @@ class UserRegister(BaseModel):
 
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12)
     is_active: bool = True
 
 
@@ -26,7 +26,7 @@ class SuperAdminRegister(BaseModel):
 
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12)
 
 
 class UserLogin(BaseModel):
@@ -40,17 +40,17 @@ class ChangeGlobalRole(BaseModel):
 
 class UserUpdate(BaseModel):
     name: str
-    password: str
+    password: str = Field(min_length=12)
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    new_password: str
+    new_password: str = Field(min_length=12)
 
 
 class ChangePasswordRequest(BaseModel):
     old_password: str
-    new_password: str
+    new_password: str = Field(min_length=12)
 
 
 class PasswordResetRequest(BaseModel):

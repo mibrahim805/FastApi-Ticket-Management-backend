@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, Request, status
@@ -13,11 +14,37 @@ settings = get_settings()
 
 def _client_identifier(request: Request) -> str:
     client_host = request.client.host if request.client else "unknown"
-    if settings.trust_proxy_headers:
+    trusted_proxies = _trusted_proxy_networks()
+    immediate_peer = _parse_ip(client_host)
+    if (
+        settings.trust_proxy_headers
+        and immediate_peer
+        and any(immediate_peer in network for network in trusted_proxies)
+    ):
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
             client_host = forwarded_for.split(",", 1)[0].strip()
     return hashlib.sha256(client_host.encode("utf-8")).hexdigest()
+
+
+def _parse_ip(value: str):
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _trusted_proxy_networks():
+    networks = []
+    for value in settings.trusted_proxy_ips.split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            continue
+    return networks
 
 
 def enforce_rate_limit(

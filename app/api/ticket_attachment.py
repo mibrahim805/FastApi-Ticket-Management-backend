@@ -53,8 +53,9 @@ ALLOWED_EXTENSIONS = {
     "docx",
     "xlsx",
     "txt",
+    "csv",
+    "log",
     "zip",
-    "py",
 }
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB

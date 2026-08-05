@@ -11,7 +11,7 @@ services:
       - "8000:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set explicitly}
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: mongodb://${MONGO_ROOT_USERNAME:?MONGO_ROOT_USERNAME must be set}:${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}@mongo:27017/?authSource=admin
       MONGO_DB_NAME: ${MONGO_DB_NAME:-mydatabase}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
@@ -29,6 +29,9 @@ services:
   mongo:
     # MongoDB 7.0.16 is pinned to keep rebuilds reproducible.
     image: mongo:7.0.16
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?MONGO_ROOT_USERNAME must be set}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}
     volumes:
       - mongo_data:/data/db
     healthcheck:

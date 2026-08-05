@@ -61,6 +61,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="TRUST_PROXY_HEADERS",
     )
+    trusted_proxy_ips: str = Field(
+        default="",
+        validation_alias="TRUSTED_PROXY_IPS",
+        description="Comma-separated trusted proxy IPs or CIDR networks",
+    )
 
 
 @lru_cache
