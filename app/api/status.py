@@ -37,6 +37,16 @@ def _normalize_status_name(name: str) -> str:
     return name.strip().lower().replace(" ", "_")
 
 
+def _status_category(key: str) -> str:
+    if key in {"closed", "resolved"}:
+        return key
+    if key in {"open", "to_do", "reopened"}:
+        return "open"
+    if key == "on_hold":
+        return "on_hold"
+    return "in_progress"
+
+
 def _serialize_status(status: dict) -> dict:
     status["_id"] = str(status["_id"])
     return status
@@ -67,6 +77,9 @@ def create_status(
     status = {
         "name": payload.name,
         "order": payload.order,
+        "key": payload.key or _normalize_status_name(payload.name),
+        "category": payload.category
+        or _status_category(payload.key or _normalize_status_name(payload.name)),
         "created_at": datetime.now(timezone.utc),
     }
     result = statuses_collection.insert_one(status)
@@ -111,6 +124,8 @@ def create_default_workflow_statuses(
         status = {
             "name": default_status["name"],
             "order": order,
+            "key": name_key,
+            "category": _status_category(name_key),
             "created_at": now,
         }
         result = statuses_collection.insert_one(status)

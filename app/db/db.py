@@ -149,6 +149,33 @@ def migrate_legacy_global_roles() -> int:
     return migrated_count
 
 
+def migrate_status_metadata() -> int:
+    """Backfill stable status keys and reporting categories."""
+    migrated_count = 0
+    for status in statuses_collection.find({}):
+        key = str(status.get("key") or status.get("name", "")).strip().lower()
+        key = key.replace("-", "_").replace(" ", "_")
+        category = status.get("category")
+        if not category:
+            if key in {"closed", "resolved"}:
+                category = key
+            elif key in {"open", "to_do", "reopened"}:
+                category = "open"
+            elif key == "on_hold":
+                category = "on_hold"
+            else:
+                category = "in_progress"
+        updates = {}
+        if status.get("key") != key:
+            updates["key"] = key
+        if status.get("category") != category:
+            updates["category"] = category
+        if updates:
+            statuses_collection.update_one({"_id": status["_id"]}, {"$set": updates})
+            migrated_count += 1
+    return migrated_count
+
+
 def migrate_legacy_workflow_transitions() -> int:
     """Move previously embedded project transitions into their own collection."""
     migrated_count = 0

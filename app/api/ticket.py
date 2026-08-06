@@ -57,6 +57,29 @@ def normalize_status_name(name: str) -> str:
     return re.sub(r"[\s-]+", "_", name.strip().lower())
 
 
+def _status_category_for_ticket(ticket: dict) -> str | None:
+    status_id = ticket.get("current_status_id")
+    if status_id:
+        try:
+            status = statuses_collection.find_one({"_id": ObjectId(str(status_id))})
+        except InvalidId:
+            status = None
+        if status and status.get("category"):
+            return status["category"]
+    # Compatibility for tickets created before status metadata was introduced.
+    legacy_key = normalize_status_name(str(ticket.get("current_status_name") or ""))
+    if legacy_key in {"resolved", "closed", "done"}:
+        return legacy_key
+    return "open" if legacy_key else None
+
+
+def _status_ids_for_categories(categories: set[str]) -> list[str]:
+    return [
+        str(status["_id"])
+        for status in statuses_collection.find({"category": {"$in": list(categories)}})
+    ]
+
+
 def _parse_object_id(value: str, field_name: str) -> ObjectId:
     try:
         return ObjectId(value)
@@ -323,6 +346,7 @@ def _run_transition_by_id(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.TRANSITION_TICKETS,
     )
     _, project = _get_ticket_project(ticket)
     transition_object_id = _parse_object_id(transition_id, "transition_id")
@@ -404,6 +428,8 @@ def create_ticket(
         project["_id"],
         current_user,
         project_members_collection,
+        capability=Capability.CREATE_TICKET,
+        role_detail="You do not have permission to create tickets",
     )
 
     epic_id = None
@@ -537,6 +563,7 @@ def get_epic(
         epic,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     project_object_id = _parse_object_id(epic.get("project_id"), "project_id")
@@ -578,6 +605,7 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     ticket["_id"] = str(ticket["_id"])
@@ -604,6 +632,7 @@ def subscribe_to_ticket(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     watcher_id = str(_parse_object_id(current_user.get("_id"), "user_id"))
     ticket_collection.update_one(
@@ -642,6 +671,7 @@ def unsubscribe_from_ticket(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     watcher_id = str(_parse_object_id(current_user.get("_id"), "user_id"))
     ticket_collection.update_one(
@@ -680,6 +710,7 @@ def get_ticket_transitions(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     _, project = _get_ticket_project(ticket)
     transitions = []
@@ -865,6 +896,7 @@ def get_ticket_links(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     canonical_ticket_id = str(ticket_object_id)
@@ -1143,7 +1175,24 @@ def _build_ticket_list_query(
         query = {"project_id": {"$in": project_ids}}
 
     if status:
-        query["status"] = status.lower()
+        status_value = status.strip()
+        if ObjectId.is_valid(status_value):
+            query["current_status_id"] = str(ObjectId(status_value))
+        else:
+            status_record = statuses_collection.find_one(
+                {
+                    "name": {
+                        "$regex": re.compile(
+                            f"^{re.escape(status_value)}$", re.IGNORECASE
+                        )
+                    }
+                }
+            )
+            if status_record:
+                query["current_status_id"] = str(status_record["_id"])
+            else:
+                # Unknown names must not match tickets accidentally.
+                query["current_status_id"] = status_value
     if priority:
         query["priority"] = priority.lower()
     if category:
@@ -1162,11 +1211,9 @@ def _build_ticket_list_query(
     if assigned_agent:
         query["assigned_agent"] = assigned_agent
     if overdue_only:
-        query["$expr"] = {
-            "$and": [
-                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
-                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
-            ]
+        query["due_date"] = {"$lt": datetime.now(timezone.utc)}
+        query["current_status_id"] = {
+            "$nin": _status_ids_for_categories({"resolved", "closed"})
         }
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)
@@ -1204,10 +1251,12 @@ def _paginate_ticket_query(
     tickets = []
     now = datetime.now(timezone.utc)
     for ticket in cursor:
-        if ticket.get("due_date") and ticket.get("current_status_name") not in [
+        status_category = _status_category_for_ticket(ticket)
+        if ticket.get("due_date") and status_category not in {
             "resolved",
             "closed",
-        ]:
+            "done",
+        }:
             ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
         else:
             ticket["is_overdue"] = False
@@ -1260,7 +1309,8 @@ def search_tickets(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
     status: Optional[str] = Query(
-        None, description="Filter by status (e.g. open, closed, pending)"
+        None,
+        description="Filter by status name or status ID (e.g. To Do or <status-id>)",
     ),
     priority: Optional[str] = Query(
         None, description="Filter by priority (e.g. low, medium, high)"
@@ -1358,7 +1408,8 @@ def get_tickets(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
     status: Optional[str] = Query(
-        None, description="Filter by status (e.g. open, closed, pending)"
+        None,
+        description="Filter by status name or status ID (e.g. To Do or <status-id>)",
     ),
     priority: Optional[str] = Query(
         None, description="Filter by priority (e.g. low, medium, high)"
@@ -1413,6 +1464,7 @@ def get_tickets(
         project["_id"],
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     query = _build_ticket_list_query(
         project_ids=[str(project["_id"])],
@@ -1471,6 +1523,7 @@ def get_tickets_summary(
             current_user,
             project_members_collection,
             allow_super_admin=True,
+            capability=Capability.VIEW_TICKET,
         )
         project_ids = [str(project_object_id)]
     else:
@@ -1487,47 +1540,44 @@ def get_tickets_summary(
     pipeline = [
         {"$match": query},
         {
+            "$lookup": {
+                "from": "statuses",
+                "localField": "current_status_id",
+                "foreignField": "_id",
+                "as": "status",
+            }
+        },
+        {"$unwind": {"path": "$status", "preserveNullAndEmptyArrays": True}},
+        {
             "$group": {
                 "_id": None,
                 "total_tickets": {"$sum": 1},
                 "to_do_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "to_do"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "to_do"]}, 1, 0]}
                 },
                 "in_development_tickets": {
                     "$sum": {
                         "$cond": [
-                            {"$eq": ["$current_status_name", "in_development"]},
+                            {"$eq": ["$status.key", "in_development"]},
                             1,
                             0,
                         ]
                     }
                 },
                 "in_qa_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "in_qa"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "in_qa"]}, 1, 0]}
                 },
                 "qa_passed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "qa_passed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "qa_passed"]}, 1, 0]}
                 },
                 "deployed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "deployed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "deployed"]}, 1, 0]}
                 },
                 "closed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "closed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "closed"]}, 1, 0]}
                 },
                 "reopened_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "reopened"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "reopened"]}, 1, 0]}
                 },
                 "high_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "high"]}, 1, 0]}

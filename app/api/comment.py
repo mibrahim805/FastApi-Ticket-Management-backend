@@ -354,6 +354,15 @@ def create_comment(
         current_user,
         project_members_collection,
     )
+    require_capability(
+        membership,
+        (
+            Capability.CREATE_INTERNAL_COMMENTS
+            if comment.visibility == CommentVisibility.INTERNAL
+            else Capability.CREATE_PUBLIC_COMMENTS
+        ),
+        detail="You do not have permission to create this comment",
+    )
     created_comment = _create_comment_document(
         ticket_id=canonical_ticket_id,
         ticket=ticket,
@@ -380,6 +389,15 @@ def create_reply(
         ticket,
         current_user,
         project_members_collection,
+    )
+    require_capability(
+        membership,
+        (
+            Capability.CREATE_INTERNAL_COMMENTS
+            if parent["visibility"] == CommentVisibility.INTERNAL.value
+            else Capability.CREATE_PUBLIC_COMMENTS
+        ),
+        detail="You do not have permission to create this reply",
     )
     _require_comment_visible(parent, membership)
     created_comment = _create_comment_document(
@@ -412,6 +430,11 @@ def get_comments(
         current_user,
         project_members_collection,
     )
+    require_capability(
+        membership,
+        Capability.VIEW_TICKET,
+        detail="You do not have permission to view ticket comments",
+    )
     comment_query = {"ticket_id": canonical_ticket_id}
     if not has_capability(membership, Capability.VIEW_INTERNAL_COMMENTS):
         comment_query["visibility"] = CommentVisibility.PUBLIC.value
@@ -437,6 +460,11 @@ def update_comment(
         ticket,
         current_user,
         project_members_collection,
+    )
+    require_capability(
+        membership,
+        Capability.VIEW_TICKET,
+        detail="You do not have permission to modify ticket comments",
     )
     _require_comment_visible(existing_comment, membership)
     _require_comment_author(existing_comment, current_user)

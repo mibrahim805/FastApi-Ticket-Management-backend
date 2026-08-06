@@ -87,6 +87,8 @@ def _require_project_access(project_id: ObjectId, current_user: dict) -> dict:
         project_id,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_PROJECT,
+        role_detail="You do not have permission to view this project",
         allow_super_admin=True,
     )
 

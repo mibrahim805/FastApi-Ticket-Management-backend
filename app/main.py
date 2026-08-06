@@ -19,6 +19,7 @@ from app.db.db import (
     ensure_database_indexes,
     migrate_legacy_global_roles,
     migrate_legacy_workflow_transitions,
+    migrate_status_metadata,
 )
 
 
@@ -26,6 +27,7 @@ from app.db.db import (
 async def lifespan(_: FastAPI):
     ensure_database_indexes()
     migrate_legacy_global_roles()
+    migrate_status_metadata()
     migrate_legacy_workflow_transitions()
     yield
 

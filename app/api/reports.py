@@ -18,6 +18,7 @@ from app.db.db import (
     project_members_collection,
     projects_collection,
     sprints_collection,
+    statuses_collection,
     ticket_collection,
     user_collection,
 )
@@ -29,10 +30,19 @@ _require_admin = require_role(
     detail="Only admins can access reports",
 )
 
-TERMINAL_STATUS_NAMES = frozenset({"resolved", "closed", "done"})
+TERMINAL_STATUS_CATEGORIES = frozenset({"resolved", "closed"})
 
 
 def _normalized_status(ticket: dict) -> str:
+    status_id = ticket.get("current_status_id")
+    if status_id:
+        try:
+            status = statuses_collection.find_one({"_id": ObjectId(str(status_id))})
+        except Exception:
+            status = None
+        if status:
+            return str(status.get("category") or status.get("key") or "unknown")
+    # Compatibility for pre-metadata tickets; all newly written tickets use IDs.
     return (
         str(ticket.get("current_status_name") or "unknown")
         .strip()
@@ -45,7 +55,7 @@ def _normalized_status(ticket: dict) -> str:
 def _is_open_ticket(ticket: dict) -> bool:
     if ticket.get("closed_date") is not None or ticket.get("resolved_date") is not None:
         return False
-    return _normalized_status(ticket) not in TERMINAL_STATUS_NAMES
+    return _normalized_status(ticket) not in TERMINAL_STATUS_CATEGORIES | {"done"}
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -366,35 +376,38 @@ def report_agent_tickets(current_user: dict = Depends(_require_admin)):
     pipeline = [
         {"$match": {"assigned_agent": {"$ne": None}}},
         {
+            "$lookup": {
+                "from": "statuses",
+                "localField": "current_status_id",
+                "foreignField": "_id",
+                "as": "status",
+            }
+        },
+        {"$unwind": {"path": "$status", "preserveNullAndEmptyArrays": True}},
+        {
             "$group": {
                 "_id": "$assigned_agent",
                 "total_tickets": {"$sum": 1},
                 "open_tickets": {
-                    "$sum": {"$cond": [{"$eq": ["$current_status_name", "open"]}, 1, 0]}
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "open"]}, 1, 0]}
                 },
                 "in_progress_tickets": {
                     "$sum": {
                         "$cond": [
-                            {"$eq": ["$current_status_name", "in_progress"]},
+                            {"$eq": ["$status.category", "in_progress"]},
                             1,
                             0,
                         ]
                     }
                 },
                 "on_hold_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "on_hold"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "on_hold"]}, 1, 0]}
                 },
                 "resolved_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "resolved"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "resolved"]}, 1, 0]}
                 },
                 "closed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "closed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "closed"]}, 1, 0]}
                 },
             }
         },
@@ -439,14 +452,22 @@ def report_overdue_tickets(current_user: dict = Depends(_require_admin)):
 
     pipeline = [
         {
+            "$lookup": {
+                "from": "statuses",
+                "localField": "current_status_id",
+                "foreignField": "_id",
+                "as": "status",
+            }
+        },
+        {"$unwind": {"path": "$status", "preserveNullAndEmptyArrays": True}},
+        {
             "$match": {
                 "$expr": {
                     "$and": [
                         {"$lt": ["$due_date", now]},
                         {
-                            "$nin": [
-                                "$current_status_name",
-                                ["resolved", "closed", "reopened"],
+                            "$not": [
+                                {"$in": ["$status.category", ["resolved", "closed"]]}
                             ]
                         },
                     ]

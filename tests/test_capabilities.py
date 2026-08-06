@@ -11,6 +11,7 @@ from app.api.permissions import (
     get_accessible_project_ids,
     has_capability,
     require_capability,
+    require_project_capability,
     transition_guard_error,
 )
 from app.models.project import ProjectRolePermissionUpdate
@@ -38,6 +39,32 @@ def test_project_override_can_revoke_a_default_capability():
         "capability_revocations": [Capability.UPDATE_TICKET.value],
     }
     assert not has_capability(membership, Capability.UPDATE_TICKET)
+
+
+@pytest.mark.parametrize("role", ["lead", "member", "reporter"])
+def test_project_capability_wrapper_enforces_revocation_for_every_project_role(
+    role, fake_collection
+):
+    project_id = ObjectId()
+    user_id = ObjectId()
+    fake_collection.documents.append(
+        {
+            "project_id": project_id,
+            "user_id": user_id,
+            "role": role,
+            "capability_revocations": [Capability.VIEW_TICKET.value],
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_project_capability(
+            project_id,
+            {"_id": user_id, "role": "customer"},
+            fake_collection,
+            Capability.VIEW_TICKET,
+        )
+
+    assert exc_info.value.status_code == 403
 
 
 def test_super_admin_has_all_capabilities():
