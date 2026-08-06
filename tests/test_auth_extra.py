@@ -56,8 +56,24 @@ def test_reset_password_invalid_token(monkeypatch, fake_collection):
     monkeypatch.setattr(registration, "reset_tokens_collection", resets)
 
     with pytest.raises(HTTPException) as exc:
-        registration.reset_password("nope", "newpass")
+        registration.reset_password("nope", "new-password")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("endpoint", ["change", "reset"])
+def test_legacy_password_body_rejects_short_password(
+    monkeypatch, fake_collection, endpoint
+):
+    if endpoint == "change":
+        with pytest.raises(HTTPException) as exc:
+            registration.change_password(
+                "old-password", "short", current_user={"_id": ObjectId()}
+            )
+    else:
+        with pytest.raises(HTTPException) as exc:
+            registration.reset_password("token", "short")
+
+    assert exc.value.status_code == 422
 
 
 def test_reset_password_success(monkeypatch, fake_collection):
@@ -94,13 +110,13 @@ def test_reset_password_success(monkeypatch, fake_collection):
         lambda password: f"hashed:{password}",
     )
 
-    response = registration.reset_password("tok", "newpass")
+    response = registration.reset_password("tok", "new-password")
 
     assert response == {"message": "Password reset successful"}
 
     # Password updated
     updated_user = users.find_one({"_id": uid})
-    assert updated_user["hashed_password"] == "hashed:newpass"
+    assert updated_user["hashed_password"] == "hashed:new-password"
 
     # Token marked as used
     updated_token = resets.find_one({"token": "tok"})
@@ -154,7 +170,7 @@ def test_update_yourself_and_change_password(monkeypatch, fake_collection):
     monkeypatch.setattr(registration, "user_collection", users)
     monkeypatch.setattr(registration, "hash_password", lambda p: f"hashed:{p}")
     monkeypatch.setattr(
-        registration, "verify_password", lambda old, h: old == "oldpass"
+        registration, "verify_password", lambda old, h: old == "old-password"
     )
 
     # update_yourself missing db_user
@@ -166,32 +182,37 @@ def test_update_yourself_and_change_password(monkeypatch, fake_collection):
     from app.models.registration import UserUpdate
 
     resp = registration.update_yourself(
-        UserUpdate(name="New", password="pw", is_active=True), current_user={"_id": uid}
+        UserUpdate(name="New", password="update-password", is_active=True),
+        current_user={"_id": uid},
     )
     assert resp == {"message": "User updated successfully"}
     updated_user = users.find_one({"_id": uid})
     assert updated_user["name"] == "New"
-    assert updated_user["hashed_password"] == "hashed:pw"
+    assert updated_user["hashed_password"] == "hashed:update-password"
     assert "password" not in updated_user
 
     # change_password: missing db_user
     with pytest.raises(HTTPException) as exc2:
-        registration.change_password("a", "b", current_user={"_id": ObjectId()})
+        registration.change_password(
+            "a", "new-password", current_user={"_id": ObjectId()}
+        )
     assert exc2.value.status_code == 404
 
     # wrong old password
     with pytest.raises(HTTPException) as exc3:
-        registration.change_password("wrong", "new", current_user={"_id": uid})
+        registration.change_password("wrong", "new-password", current_user={"_id": uid})
     assert exc3.value.status_code == 401
 
     # same new password
     with pytest.raises(HTTPException) as exc4:
-        registration.change_password("oldpass", "oldpass", current_user={"_id": uid})
+        registration.change_password(
+            "old-password", "old-password", current_user={"_id": uid}
+        )
     assert exc4.value.status_code == 400
 
     # successful change
     resp2 = registration.change_password(
-        "oldpass", "newpass", current_user={"_id": uid}
+        "old-password", "new-password", current_user={"_id": uid}
     )
     assert resp2 == {"message": "Password changed successfully"}
-    assert users.find_one({"_id": uid})["hashed_password"] == "hashed:newpass"
+    assert users.find_one({"_id": uid})["hashed_password"] == "hashed:new-password"

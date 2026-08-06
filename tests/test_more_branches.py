@@ -263,7 +263,7 @@ def test_register_admin_always_creates_admin(monkeypatch, fake_collection):
     payload = registration.AdminRegister(
         name="X",
         email="x@example.com",
-        password="p",
+        password="registration-password",
     )
 
     registration.register_admin(

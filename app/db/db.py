@@ -46,11 +46,18 @@ SPRINT_PROJECT_NAME_INDEX = "sprints_project_name_unique"
 SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
 TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
 TICKET_BACKLOG_ORDER_INDEX = "tickets_project_backlog_position"
+SUPER_ADMIN_UNIQUE_INDEX = "users_one_super_admin"
 LEGACY_INERT_GLOBAL_ROLES = frozenset({"user", "customer", "agent"})
 
 
 def ensure_database_indexes() -> None:
     """Create the indexes required for application-level invariants."""
+    user_collection.create_index(
+        [("role", ASCENDING)],
+        name=SUPER_ADMIN_UNIQUE_INDEX,
+        unique=True,
+        partialFilterExpression={"role": "super_admin"},
+    )
     projects_collection.create_index(
         [("code", ASCENDING)],
         name=PROJECT_CODE_UNIQUE_INDEX,

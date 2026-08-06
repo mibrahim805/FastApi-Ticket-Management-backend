@@ -39,6 +39,7 @@ def test_project_update_key_rejects_invalid_values(code):
 
 def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch):
     project_calls = []
+    user_calls = []
     issue_link_calls = []
     transition_calls = []
     notification_preference_calls = []
@@ -58,6 +59,11 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
         database,
         "projects_collection",
         RecordingCollection(project_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "user_collection",
+        RecordingCollection(user_calls),
     )
     monkeypatch.setattr(
         database,
@@ -96,6 +102,17 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     )
 
     database.ensure_database_indexes()
+
+    assert user_calls == [
+        (
+            [("role", 1)],
+            {
+                "name": "users_one_super_admin",
+                "unique": True,
+                "partialFilterExpression": {"role": "super_admin"},
+            },
+        )
+    ]
 
     assert project_calls == [
         (

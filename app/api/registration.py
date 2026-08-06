@@ -1,6 +1,7 @@
 from bson import ObjectId
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.params import Depends
+from pymongo.errors import DuplicateKeyError
 
 from app.api.auth import (
     create_access_token,
@@ -38,6 +39,8 @@ from app.models.registration import (
 
 router = APIRouter(tags=["Auth"])
 
+MIN_PASSWORD_LENGTH = 12
+
 _require_super_admin = require_role(
     *SUPER_ADMIN_ROLES,
     detail="Only super admin can register an admin",
@@ -54,10 +57,6 @@ _require_admin = require_role(
     dependencies=[Depends(registration_rate_limit)],
 )
 def register_super_admin(user: SuperAdminRegister):
-    existing_admin = user_collection.find_one({"role": "super_admin"})
-    if existing_admin:
-        return {"message": "An super admin already exists."}
-
     hashed_password = hash_password(user.password)
     super_admin_user = {
         "username": user.name,
@@ -66,7 +65,16 @@ def register_super_admin(user: SuperAdminRegister):
         "role": "super_admin",
         "is_active": True,
     }
-    user_collection.insert_one(super_admin_user)
+
+    # The partial unique index on users.role is the synchronization primitive
+    # for first-admin setup. The insert and the constraint check therefore
+    # happen atomically in MongoDB; the loser of a concurrent setup request
+    # receives DuplicateKeyError instead of creating a second super admin.
+    try:
+        user_collection.insert_one(super_admin_user)
+    except DuplicateKeyError:
+        return {"message": "An super admin already exists."}
+
     return {"message": "Super admin registered successfully"}
 
 
@@ -233,7 +241,7 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
 @router.put("/change_password/", tags=["Auth"])
 def change_password(
     payload: ChangePasswordRequest | str = Body(...),
-    new_password: str | None = Body(default=None),
+    new_password: str | None = Body(default=None, min_length=MIN_PASSWORD_LENGTH),
     current_user: dict = Depends(get_current_user),
 ):
     if isinstance(payload, ChangePasswordRequest):
@@ -242,6 +250,11 @@ def change_password(
         old_password = payload
     if old_password is None or new_password is None:
         raise HTTPException(status_code=422, detail="Password fields are required")
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters",
+        )
     db_user = user_collection.find_one(ObjectId(current_user["_id"]))
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -291,7 +304,7 @@ def request_password_reset(
 )
 def reset_password(
     payload: ResetPasswordRequest | str = Body(...),
-    new_password: str | None = Body(default=None),
+    new_password: str | None = Body(default=None, min_length=MIN_PASSWORD_LENGTH),
 ):
     if isinstance(payload, ResetPasswordRequest):
         token, new_password = payload.token, payload.new_password
@@ -300,6 +313,11 @@ def reset_password(
     if token is None or new_password is None:
         raise HTTPException(
             status_code=422, detail="Token and new_password are required"
+        )
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters",
         )
     record = verify_password_reset_token(reset_tokens_collection, token)
 
