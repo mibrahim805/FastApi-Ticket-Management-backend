@@ -24,7 +24,6 @@ from app.db.db import (
     project_components_collection,
     project_members_collection,
     projects_collection,
-    sprints_collection,
     statuses_collection,
     ticket_collection,
     transitions_collection,
@@ -80,7 +79,7 @@ _require_super_admin = require_role(
 def _get_project_or_404(project_id: str) -> tuple:
     project_object_id = parse_object_id(project_id, "project_id")
     project = projects_collection.find_one({"_id": project_object_id})
-    if not project:
+    if not project or project.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project_object_id, project
 
@@ -184,7 +183,11 @@ def get_projects(current_user: dict = Depends(get_current_user)):
     user_id = parse_object_id(current_user.get("_id"), "user_id")
 
     if current_user.get("role") == "super_admin":
-        projects = list(projects_collection.find({}))
+        projects = [
+            project
+            for project in projects_collection.find({})
+            if project.get("deleted_at") is None
+        ]
     else:
         memberships = list(project_members_collection.find({"user_id": user_id}))
         projects = []
@@ -196,7 +199,7 @@ def get_projects(current_user: dict = Depends(get_current_user)):
             if not project_id or project_id in seen_project_ids:
                 continue
             project = projects_collection.find_one({"_id": project_id})
-            if project:
+            if project and project.get("deleted_at") is None:
                 projects.append(project)
                 seen_project_ids.add(project_id)
 
@@ -730,11 +733,18 @@ def delete_project(
         detail="Only super_admin can perform this action",
     )
     project_object_id, _ = _get_project_or_404(project_id)
-    projects_collection.delete_one({"_id": project_object_id})
-    project_members_collection.delete_many({"project_id": project_object_id})
-    transitions_collection.delete_many({"project_id": project_object_id})
-    sprints_collection.delete_many({"project_id": project_object_id})
-    return {"message": "Project deleted"}
+    projects_collection.update_one(
+        {"_id": project_object_id},
+        {
+            "$set": {
+                "deleted_at": datetime.now(timezone.utc),
+                "deleted_by": str(current_user["_id"]),
+                "deletion_reason": "deleted_by_super_admin",
+                "status": "archived",
+            }
+        },
+    )
+    return {"message": "Project archived successfully"}
 
 
 @router.patch("/{project_id}/statuses")

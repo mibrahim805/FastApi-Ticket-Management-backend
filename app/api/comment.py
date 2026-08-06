@@ -49,7 +49,7 @@ def _visibility_value(visibility: CommentVisibility | str) -> str:
 def _get_ticket_or_404(ticket_id: str) -> tuple[str, dict]:
     ticket_object_id = parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return str(ticket_object_id), ticket
 

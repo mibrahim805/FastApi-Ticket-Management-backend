@@ -117,7 +117,7 @@ def test_project_update_get_delete_success(
     resp4 = project_mod.delete_project(
         str(d), current_user={"_id": lead_id, "role": "super_admin"}
     )
-    assert resp4["message"] == "Project deleted"
+    assert resp4["message"] == "Project archived successfully"
 
 
 def test_assign_statuses_to_project_too_few(

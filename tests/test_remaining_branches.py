@@ -339,7 +339,7 @@ def test_ticket_get_update_summary_delete(
     resp3 = ticket_mod.delete_ticket(
         str(td), current_user={"_id": delete_lead_id, "role": "super_admin"}
     )
-    assert resp3["message"] == "Ticket deleted successfully"
+    assert resp3["message"] == "Ticket archived successfully"
 
 
 def test_super_admin_decorator_behaviour():

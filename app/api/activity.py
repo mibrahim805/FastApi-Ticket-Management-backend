@@ -63,7 +63,7 @@ def log_project_activity(
 def get_ticket_activity(ticket_id: str, current_user=Depends(get_current_user)):
     ticket_object_id = parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     require_ticket_membership(

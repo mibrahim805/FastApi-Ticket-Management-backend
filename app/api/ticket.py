@@ -129,7 +129,7 @@ def _serialize_transition(transition: dict) -> dict:
 def _get_ticket_or_404(ticket_id: str) -> tuple[ObjectId, dict]:
     ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket_object_id, ticket
 
@@ -421,7 +421,7 @@ def create_ticket(
     project = projects_collection.find_one(
         {"_id": _parse_object_id(payload.project_id, "project_id")}
     )
-    if not project:
+    if not project or project.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Project not found")
 
     require_project_membership(
@@ -598,7 +598,7 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     ticket = ticket_collection.find_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}
     )
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     membership = require_ticket_membership(
@@ -1170,9 +1170,12 @@ def _build_ticket_list_query(
     components: Optional[List[str]] = None,
 ) -> dict:
     if len(project_ids) == 1:
-        query = {"project_id": project_ids[0]}
+        query = {"project_id": project_ids[0], "deleted_at": {"$exists": False}}
     else:
-        query = {"project_id": {"$in": project_ids}}
+        query = {
+            "project_id": {"$in": project_ids},
+            "deleted_at": {"$exists": False},
+        }
 
     if status:
         status_value = status.strip()
@@ -1604,7 +1607,7 @@ def get_tickets_summary(
 def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
     ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     require_ticket_membership(
@@ -1635,14 +1638,15 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
             }
         ],
     )
-    ticket_collection.delete_one({"_id": ticket_object_id})
-    issue_links_collection.delete_many(
+    ticket_collection.update_one(
+        {"_id": ticket_object_id},
         {
-            "$or": [
-                {"from_ticket_id": str(ticket_object_id)},
-                {"to_ticket_id": str(ticket_object_id)},
-            ]
-        }
+            "$set": {
+                "deleted_at": datetime.now(timezone.utc),
+                "deleted_by": str(current_user["_id"]),
+                "deletion_reason": "deleted_by_user",
+            }
+        },
     )
 
     create_notification(
@@ -1655,4 +1659,4 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         preferences_collection=notification_preferences_collection,
     )
 
-    return {"message": "Ticket deleted successfully"}
+    return {"message": "Ticket archived successfully"}

@@ -363,7 +363,11 @@ def get_accessible_project_ids(
 ) -> list[str]:
     """Return canonical project IDs the current user is allowed to browse."""
     if current_user.get("role") == "super_admin":
-        return [str(project["_id"]) for project in projects_collection.find({})]
+        return [
+            str(project["_id"])
+            for project in projects_collection.find({})
+            if project.get("deleted_at") is None
+        ]
 
     user_id = parse_object_id(current_user.get("_id"), "user_id")
     memberships = project_members_collection.find({"user_id": user_id})

@@ -33,6 +33,10 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
             if document.get(key) not in expected["$in"]:
                 return False
             continue
+        if isinstance(expected, dict) and "$exists" in expected:
+            if (key in document) is not expected["$exists"]:
+                return False
+            continue
         if isinstance(expected, dict) and "$all" in expected:
             value = document.get(key)
             if not isinstance(value, list) or not all(
