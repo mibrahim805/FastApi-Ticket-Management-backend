@@ -283,7 +283,7 @@ def get_project_capabilities(
     current_user: dict = Depends(get_current_user),
 ):
     """Return the authenticated user's effective capabilities for a project."""
-    project_object_id, _ = _get_project_or_404(project_id)
+    project_object_id, project = _get_project_or_404(project_id)
     membership = require_project_membership(
         project_object_id,
         current_user,
@@ -753,7 +753,7 @@ def assign_statuses_to_project(
     payload: ProjectStatusAssign,
     current_user: dict = Depends(get_current_user),
 ):
-    project_object_id, _ = _get_project_or_404(project_id)
+    project_object_id, project = _get_project_or_404(project_id)
     _require_project_admin(project_object_id, current_user)
 
     if len(payload.status_ids) < 2:
@@ -766,6 +766,36 @@ def assign_statuses_to_project(
         raise HTTPException(
             status_code=400,
             detail="Duplicate status IDs are not allowed",
+        )
+
+    existing_status_ids = {
+        str(status_id) for status_id in project.get("assigned_statuses", [])
+    }
+    removed_status_ids = existing_status_ids - set(payload.status_ids)
+    migrations = {
+        migration.remove_status_id: migration.move_existing_tickets_to
+        for migration in payload.status_migrations
+    }
+    missing_migrations = sorted(removed_status_ids - migrations.keys())
+    if missing_migrations:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Each removed status requires a migration target: "
+                + ", ".join(missing_migrations)
+            ),
+        )
+    unknown_migrations = set(migrations) - removed_status_ids
+    if unknown_migrations:
+        raise HTTPException(
+            status_code=400,
+            detail="Status migrations may only reference statuses being removed",
+        )
+    invalid_targets = set(migrations.values()) - set(payload.status_ids)
+    if invalid_targets:
+        raise HTTPException(
+            status_code=400,
+            detail="Status migration targets must be assigned to the project",
         )
 
     statuses = []
@@ -782,6 +812,21 @@ def assign_statuses_to_project(
 
     statuses.sort(key=lambda status: status["order"])
     ordered_ids = [str(status["_id"]) for status in statuses]
+
+    status_names = {str(status["_id"]): status["name"] for status in statuses}
+    for removed_status_id, target_status_id in migrations.items():
+        ticket_collection.update_many(
+            {
+                "project_id": str(project_object_id),
+                "current_status_id": removed_status_id,
+            },
+            {
+                "$set": {
+                    "current_status_id": target_status_id,
+                    "current_status_name": status_names[target_status_id],
+                }
+            },
+        )
 
     projects_collection.update_one(
         {"_id": project_object_id},

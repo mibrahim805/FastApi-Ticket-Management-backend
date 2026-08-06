@@ -82,8 +82,14 @@ class ProjectMemberResponse(BaseModel):
     role: ProjectMemberRole
 
 
+class StatusMigration(BaseModel):
+    remove_status_id: str
+    move_existing_tickets_to: str
+
+
 class ProjectStatusAssign(BaseModel):
     status_ids: List[str]
+    status_migrations: List[StatusMigration] = Field(default_factory=list)
 
 
 class ProjectRolePermissionUpdate(BaseModel):

@@ -8,7 +8,7 @@ from app.api.permissions import (
     ensure_role,
     require_role,
 )
-from app.db.db import projects_collection, statuses_collection
+from app.db.db import projects_collection, statuses_collection, ticket_collection
 from app.models.status import StatusCreate, StatusUpdate
 
 router = APIRouter(prefix="/statuses", tags=["Statuses"])
@@ -178,6 +178,11 @@ def update_status(
         raise HTTPException(status_code=400, detail="No fields provided to update")
 
     statuses_collection.update_one({"_id": ObjectId(status_id)}, {"$set": update_data})
+    if "name" in update_data:
+        ticket_collection.update_many(
+            {"current_status_id": status_id},
+            {"$set": {"current_status_name": update_data["name"]}},
+        )
     return {"message": "Status updated successfully"}
 
 

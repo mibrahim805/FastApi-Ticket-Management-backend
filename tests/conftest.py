@@ -145,6 +145,19 @@ class FakeCollection:
                 self.updated_documents.append((query, update))
                 return
 
+    def update_many(self, query, update):
+        matched_count = 0
+        for document in self.documents:
+            if not _matches(document, query):
+                continue
+            matched_count += 1
+            if "$set" in update:
+                document.update(update["$set"])
+            if "$unset" in update:
+                for key in update["$unset"]:
+                    document.pop(key, None)
+        return type("UpdateResult", (), {"matched_count": matched_count})()
+
     def delete_one(self, query):
         if isinstance(query, ObjectId):
             query = {"_id": query}
