@@ -45,6 +45,7 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     notification_preference_calls = []
     saved_filter_calls = []
     rate_limit_calls = []
+    reset_token_calls = []
     sprint_calls = []
     ticket_calls = []
 
@@ -92,6 +93,11 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     )
     monkeypatch.setattr(
         database,
+        "reset_tokens_collection",
+        RecordingCollection(reset_token_calls),
+    )
+    monkeypatch.setattr(
+        database,
         "sprints_collection",
         RecordingCollection(sprint_calls),
     )
@@ -111,6 +117,12 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
                 "unique": True,
                 "partialFilterExpression": {"role": "super_admin"},
             },
+        )
+    ]
+    assert reset_token_calls == [
+        (
+            [("expires_at", 1)],
+            {"name": "reset_tokens_expiry_ttl", "expireAfterSeconds": 0},
         )
     ]
 

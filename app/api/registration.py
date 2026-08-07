@@ -1,15 +1,15 @@
 from bson import ObjectId
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.params import Depends
 from pymongo.errors import DuplicateKeyError
 
 from app.api.auth import (
+    consume_password_reset_token,
     create_access_token,
     create_password_reset_token,
     get_current_user,
     hash_password,
     verify_password,
-    verify_password_reset_token,
 )
 from app.api.permissions import (
     ADMIN_ROLES,
@@ -240,21 +240,10 @@ def update_yourself(user: UserUpdate, current_user: dict = Depends(get_current_u
 
 @router.put("/change_password/", tags=["Auth"])
 def change_password(
-    payload: ChangePasswordRequest | str = Body(...),
-    new_password: str | None = Body(default=None, min_length=MIN_PASSWORD_LENGTH),
+    payload: ChangePasswordRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    if isinstance(payload, ChangePasswordRequest):
-        old_password, new_password = payload.old_password, payload.new_password
-    else:
-        old_password = payload
-    if old_password is None or new_password is None:
-        raise HTTPException(status_code=422, detail="Password fields are required")
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=422,
-            detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters",
-        )
+    old_password, new_password = payload.old_password, payload.new_password
     db_user = user_collection.find_one(ObjectId(current_user["_id"]))
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -283,10 +272,9 @@ def change_password(
     dependencies=[Depends(password_reset_rate_limit)],
 )
 def request_password_reset(
-    payload: PasswordResetRequest | str = Body(...),
+    payload: PasswordResetRequest,
 ):
-    email = payload.email if isinstance(payload, PasswordResetRequest) else payload
-    user = user_collection.find_one({"email": email})
+    user = user_collection.find_one({"email": payload.email})
 
     if not user:
         return {"message": "If the email exists, a reset link has been sent"}
@@ -303,23 +291,10 @@ def request_password_reset(
     dependencies=[Depends(password_reset_rate_limit)],
 )
 def reset_password(
-    payload: ResetPasswordRequest | str = Body(...),
-    new_password: str | None = Body(default=None, min_length=MIN_PASSWORD_LENGTH),
+    payload: ResetPasswordRequest,
 ):
-    if isinstance(payload, ResetPasswordRequest):
-        token, new_password = payload.token, payload.new_password
-    else:
-        token = payload
-    if token is None or new_password is None:
-        raise HTTPException(
-            status_code=422, detail="Token and new_password are required"
-        )
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=422,
-            detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters",
-        )
-    record = verify_password_reset_token(reset_tokens_collection, token)
+    token, new_password = payload.token, payload.new_password
+    record = consume_password_reset_token(reset_tokens_collection, token)
 
     if not record:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
@@ -338,6 +313,12 @@ def reset_password(
             }
         },
     )
-    reset_tokens_collection.update_one({"token": token}, {"$set": {"used": True}})
+    reset_tokens_collection.update_many(
+        {
+            "user_id": record["user_id"],
+            "used": False,
+        },
+        {"$set": {"used": True}},
+    )
 
     return {"message": "Password reset successful"}

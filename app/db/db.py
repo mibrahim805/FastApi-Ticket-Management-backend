@@ -42,6 +42,7 @@ TRANSITION_PROJECT_SOURCE_INDEX = "transitions_project_source"
 NOTIFICATION_PREFERENCE_UNIQUE_INDEX = "notification_preferences_user_project_unique"
 SAVED_FILTER_USER_NAME_INDEX = "saved_filters_user_name_unique"
 RATE_LIMIT_EXPIRY_INDEX = "rate_limits_expiry_ttl"
+RESET_TOKEN_EXPIRY_INDEX = "reset_tokens_expiry_ttl"
 SPRINT_PROJECT_NAME_INDEX = "sprints_project_name_unique"
 SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
 TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
@@ -102,6 +103,11 @@ def ensure_database_indexes() -> None:
     rate_limits_collection.create_index(
         [("expires_at", ASCENDING)],
         name=RATE_LIMIT_EXPIRY_INDEX,
+        expireAfterSeconds=0,
+    )
+    reset_tokens_collection.create_index(
+        [("expires_at", ASCENDING)],
+        name=RESET_TOKEN_EXPIRY_INDEX,
         expireAfterSeconds=0,
     )
     sprints_collection.create_index(

@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 from datetime import datetime, timedelta
 
@@ -6,6 +7,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from pymongo import ReturnDocument
 
 from app.config import get_settings
 from app.db.db import user_collection
@@ -63,9 +65,10 @@ def generate_reset_token():
 
 def create_password_reset_token(reset_tokens_collection, user):
     token = generate_reset_token()
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     doc = {
-        "token": token,
+        "token_hash": token_hash,
         "user_id": str(user["_id"]),
         "email": user["email"],
         "type": "password_reset",
@@ -80,14 +83,29 @@ def create_password_reset_token(reset_tokens_collection, user):
 
 
 def verify_password_reset_token(reset_tokens_collection, token: str):
-    record = reset_tokens_collection.find_one({"token": token})
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    record = reset_tokens_collection.find_one(
+        {
+            "token_hash": token_hash,
+            "used": False,
+            "expires_at": {"$gt": datetime.utcnow()},
+        }
+    )
     if not record:
         return None
-
-    if record.get("used"):
-        return None
-
-    if record["expires_at"] < datetime.utcnow():
-        return None
-
     return record
+
+
+def consume_password_reset_token(reset_tokens_collection, token: str):
+    """Atomically mark a live reset token used and return its record."""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.utcnow()
+    return reset_tokens_collection.find_one_and_update(
+        {
+            "token_hash": token_hash,
+            "used": False,
+            "expires_at": {"$gt": now},
+        },
+        {"$set": {"used": True, "used_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
