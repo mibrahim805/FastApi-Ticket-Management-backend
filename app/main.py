@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.api import (
     activity,
@@ -15,12 +15,15 @@ from app.api import (
     ticket,
     ticket_attachment,
 )
+from app.api.ticket_attachment import get_attachment_storage
+from app.db.db import client as mongo_client
 from app.db.db import (
     ensure_database_indexes,
     migrate_legacy_global_roles,
     migrate_legacy_workflow_transitions,
     migrate_status_metadata,
 )
+from app.storage.attachments import LocalAttachmentStorage
 
 
 @asynccontextmanager
@@ -36,10 +39,35 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/health", tags=["health"])
-async def health() -> dict[str, str]:
-    """Report that the API process is running."""
+@app.get("/health/live", tags=["health"])
+async def health_live() -> dict[str, str]:
+    """Report that the API process is running, without checking dependencies."""
     return {"status": "ok"}
+
+
+@app.get("/health/ready", tags=["health"])
+async def health_ready() -> dict:
+    checks = {}
+    try:
+        mongo_client.admin.command("ping")
+        checks["mongodb"] = "ok"
+    except Exception:
+        checks["mongodb"] = "unavailable"
+    try:
+        storage = get_attachment_storage()
+        if isinstance(storage, LocalAttachmentStorage):
+            if not storage.root.is_dir():
+                raise OSError("attachment directory is unavailable")
+        else:
+            storage._get_client().head_bucket(Bucket=storage.bucket)
+        checks["attachments"] = "ok"
+    except Exception:
+        checks["attachments"] = "unavailable"
+    if "unavailable" in checks.values():
+        raise HTTPException(
+            status_code=503, detail={"status": "unavailable", "checks": checks}
+        )
+    return {"status": "ok", "checks": checks}
 
 
 app.include_router(registration.router)
