@@ -514,6 +514,7 @@ def _request(headers=None):
 
 def test_rate_limit_proxy_duplicate_and_dependency_paths(monkeypatch):
     monkeypatch.setattr(rate_limit.settings, "trust_proxy_headers", True)
+    monkeypatch.setattr(rate_limit.settings, "trusted_proxy_ips", "203.0.113.2/32")
     identifier = rate_limit._client_identifier(
         _request([(b"x-forwarded-for", b"198.51.100.8, 10.0.0.1")])
     )

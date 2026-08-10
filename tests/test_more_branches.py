@@ -9,7 +9,7 @@ from app.api import project as project_mod
 from app.api import status as status_mod
 from app.api import ticket as ticket_mod
 from app.models.status import StatusUpdate
-from app.models.ticket import TicketUpdate
+from app.models.ticket import Category, Priority, TicketUpdate
 
 
 def test_activity_log_and_conversion(monkeypatch, fake_collection, grant_project_role):
@@ -160,7 +160,7 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     with pytest.raises(HTTPException):
         ticket_mod.update_ticket(
             str(ObjectId()),
-            TicketUpdate(priority="p", category="c"),
+            TicketUpdate(priority=Priority.LOW, category=Category.BUG),
             current_user={"_id": ObjectId(), "role": "agent"},
         )
 
@@ -169,7 +169,7 @@ def test_ticket_update_missing_and_unauthorized_and_filters(
     with pytest.raises(HTTPException):
         ticket_mod.update_ticket(
             str(tid),
-            TicketUpdate(priority="p", category="c"),
+            TicketUpdate(priority=Priority.LOW, category=Category.BUG),
             current_user={"_id": ObjectId(), "role": "agent"},
         )
 

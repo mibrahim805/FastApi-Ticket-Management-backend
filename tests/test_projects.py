@@ -111,13 +111,21 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
 
     assert user_calls == [
         (
+            [("email_key", 1)],
+            {
+                "name": "users_email_key_unique",
+                "unique": True,
+                "partialFilterExpression": {"email_key": {"$type": "string"}},
+            },
+        ),
+        (
             [("role", 1)],
             {
                 "name": "users_one_super_admin",
                 "unique": True,
                 "partialFilterExpression": {"role": "super_admin"},
             },
-        )
+        ),
     ]
     assert reset_token_calls == [
         (
@@ -159,8 +167,8 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     ]
     assert transition_calls == [
         (
-            [("project_id", 1), ("name", 1)],
-            {"name": "transitions_project_name"},
+            [("project_id", 1), ("name_key", 1)],
+            {"name": "transitions_project_name", "unique": True},
         ),
         (
             [("project_id", 1), ("from_status_ids", 1)],
