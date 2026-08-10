@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
 
 from app.api.permissions import (
     SUPER_ADMIN_ROLES,
     ensure_role,
+    parse_object_id,
     require_role,
 )
 from app.db.db import projects_collection, statuses_collection, ticket_collection
@@ -176,7 +176,8 @@ def update_status(
         detail="Only super_admin can manage statuses",
     )
 
-    status = statuses_collection.find_one({"_id": ObjectId(status_id)})
+    status_object_id = parse_object_id(status_id, "status_id")
+    status = statuses_collection.find_one({"_id": status_object_id})
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
@@ -184,7 +185,25 @@ def update_status(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields provided to update")
 
-    statuses_collection.update_one({"_id": ObjectId(status_id)}, {"$set": update_data})
+    if "name" in update_data:
+        update_data["name_key"] = _normalize_status_name(update_data["name"])
+        duplicate = statuses_collection.find_one(
+            {"name_key": update_data["name_key"], "_id": {"$ne": status_object_id}}
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Status name already exists")
+    if "order" in update_data:
+        duplicate = statuses_collection.find_one(
+            {"order": update_data["order"], "_id": {"$ne": status_object_id}}
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Status order already exists")
+    try:
+        statuses_collection.update_one({"_id": status_object_id}, {"$set": update_data})
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409, detail="Status name or order already exists"
+        )
     if "name" in update_data:
         ticket_collection.update_many(
             {"current_status_id": status_id},
@@ -204,7 +223,8 @@ def delete_status(
         detail="Only super_admin can manage statuses",
     )
 
-    status = statuses_collection.find_one({"_id": ObjectId(status_id)})
+    status_object_id = parse_object_id(status_id, "status_id")
+    status = statuses_collection.find_one({"_id": status_object_id})
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
@@ -215,5 +235,5 @@ def delete_status(
             detail="Cannot delete — this status is assigned to one or more projects",
         )
 
-    statuses_collection.delete_one({"_id": ObjectId(status_id)})
+    statuses_collection.delete_one({"_id": status_object_id})
     return {"message": "Status deleted successfully"}
