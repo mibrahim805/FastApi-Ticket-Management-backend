@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from pymongo import ASCENDING, MongoClient
+from pymongo.errors import OperationFailure
 
 from app.config import get_settings
 
@@ -56,9 +57,29 @@ STATUS_ORDER_INDEX = "statuses_order_unique"
 LEGACY_INERT_GLOBAL_ROLES = frozenset({"user", "customer", "agent"})
 
 
+def _ensure_index(collection, keys, **options):
+    """Create an index, reconciling an older definition with the same name."""
+    try:
+        return collection.create_index(keys, **options)
+    except OperationFailure as error:
+        if error.code != 86 or not hasattr(collection, "drop_index"):
+            raise
+        collection.drop_index(options["name"])
+        try:
+            return collection.create_index(keys, **options)
+        except OperationFailure as recreate_error:
+            # Another application instance may have reconciled the index
+            # concurrently. If it is the same named conflict, its unique
+            # constraint is already present and startup can continue.
+            if recreate_error.code == 86:
+                return options["name"]
+            raise
+
+
 def ensure_database_indexes() -> None:
     """Create the indexes required for application-level invariants."""
-    user_collection.create_index(
+    _ensure_index(
+        user_collection,
         [("email_key", ASCENDING)],
         name=USER_EMAIL_UNIQUE_INDEX,
         unique=True,
@@ -80,9 +101,9 @@ def ensure_database_indexes() -> None:
     ]:
         if hasattr(collection, "create_index"):
             options = {"name": name, "unique": True}
-            if keys[-1][0] != "order":
-                options["partialFilterExpression"] = {keys[-1][0]: {"$type": "string"}}
-            collection.create_index(keys, **options)
+            if collection is statuses_collection and keys[-1][0] == "name_key":
+                options["partialFilterExpression"] = {"name_key": {"$type": "string"}}
+            _ensure_index(collection, keys, **options)
     user_collection.create_index(
         [("role", ASCENDING)],
         name=SUPER_ADMIN_UNIQUE_INDEX,
@@ -112,11 +133,11 @@ def ensure_database_indexes() -> None:
         [("to_ticket_id", ASCENDING)],
         name=ISSUE_LINK_TO_TICKET_INDEX,
     )
-    transitions_collection.create_index(
+    _ensure_index(
+        transitions_collection,
         [("project_id", ASCENDING), ("name_key", ASCENDING)],
         name=TRANSITION_PROJECT_NAME_INDEX,
         unique=True,
-        partialFilterExpression={"name_key": {"$type": "string"}},
     )
     transitions_collection.create_index(
         [("project_id", ASCENDING), ("from_status_ids", ASCENDING)],

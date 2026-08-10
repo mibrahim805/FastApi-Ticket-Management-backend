@@ -416,6 +416,12 @@ def require_project_membership(
             detail="You are not a member of this project",
         )
 
+    if membership.get("suspended"):
+        raise HTTPException(
+            status_code=403,
+            detail="Your project access is suspended",
+        )
+
     if membership.get("role") not in PROJECT_MEMBER_ROLES:
         raise HTTPException(
             status_code=403,

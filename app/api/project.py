@@ -39,7 +39,11 @@ from app.models.project import (
     ProjectStatusAssign,
     ProjectUpdate,
 )
-from app.models.project_member import ProjectMemberCreate
+from app.models.project_member import (
+    ProjectMemberCreate,
+    ProjectMemberRoleUpdate,
+    ProjectMemberSuspension,
+)
 from app.models.transition import (
     ProjectWorkflowUpdate,
     TransitionCreate,
@@ -924,6 +928,7 @@ def add_project_member(
                 "project_id": project_object_id,
                 "user_id": member_user_id,
                 "role": member.role.value,
+                "suspended": False,
                 "capability_grants": override["grants"],
                 "capability_revocations": override["revocations"],
             }
@@ -955,6 +960,124 @@ def add_project_member(
         "id": str(result.inserted_id),
         "message": "Project member added successfully",
     }
+
+
+@router.patch("/{project_id}/members/{user_id}/role")
+def update_project_member_role(
+    project_id: str,
+    user_id: str,
+    payload: ProjectMemberRoleUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    member_user_id = parse_object_id(user_id, "user_id")
+    membership = project_members_collection.find_one(
+        {"project_id": project_object_id, "user_id": member_user_id}
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Project member not found")
+    if (
+        membership.get("role") == ProjectMemberRole.LEAD.value
+        and payload.role != ProjectMemberRole.LEAD
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Transfer lead ownership before changing the lead role",
+        )
+    override = _permission_override(project, payload.role.value)
+    project_members_collection.update_one(
+        {"_id": membership["_id"]},
+        {
+            "$set": {
+                "role": payload.role.value,
+                "capability_grants": override["grants"],
+                "capability_revocations": override["revocations"],
+            }
+        },
+    )
+    return {"message": "Project member role updated", "role": payload.role.value}
+
+
+@router.patch("/{project_id}/members/{user_id}/suspension")
+def suspend_project_member(
+    project_id: str,
+    user_id: str,
+    payload: ProjectMemberSuspension,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    member_user_id = parse_object_id(user_id, "user_id")
+    membership = project_members_collection.find_one(
+        {"project_id": project_object_id, "user_id": member_user_id}
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Project member not found")
+    if membership.get("role") == ProjectMemberRole.LEAD.value:
+        raise HTTPException(
+            status_code=409, detail="Transfer lead ownership before suspending the lead"
+        )
+    project_members_collection.update_one(
+        {"_id": membership["_id"]}, {"$set": {"suspended": payload.suspended}}
+    )
+    return {
+        "message": "Project member suspension updated",
+        "suspended": payload.suspended,
+    }
+
+
+@router.delete("/{project_id}/members/{user_id}")
+def remove_project_member(
+    project_id: str, user_id: str, current_user: dict = Depends(get_current_user)
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    member_user_id = parse_object_id(user_id, "user_id")
+    membership = project_members_collection.find_one(
+        {"project_id": project_object_id, "user_id": member_user_id}
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Project member not found")
+    if membership.get("role") == ProjectMemberRole.LEAD.value:
+        raise HTTPException(
+            status_code=409, detail="Transfer lead ownership before removing the lead"
+        )
+    project_members_collection.delete_one({"_id": membership["_id"]})
+    return {"message": "Project member removed"}
+
+
+@router.post("/{project_id}/members/{user_id}/transfer-lead")
+def transfer_project_lead(
+    project_id: str, user_id: str, current_user: dict = Depends(get_current_user)
+):
+    project_object_id, project = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    target_id = parse_object_id(user_id, "user_id")
+    target = project_members_collection.find_one(
+        {"project_id": project_object_id, "user_id": target_id}
+    )
+    if not target or target.get("suspended"):
+        raise HTTPException(
+            status_code=400, detail="Target must be an active project member"
+        )
+    project_members_collection.update_many(
+        {"project_id": project_object_id, "role": ProjectMemberRole.LEAD.value},
+        {"$set": {"role": ProjectMemberRole.MEMBER.value}},
+    )
+    override = _permission_override(project, ProjectMemberRole.LEAD.value)
+    project_members_collection.update_one(
+        {"_id": target["_id"]},
+        {
+            "$set": {
+                "role": ProjectMemberRole.LEAD.value,
+                "suspended": False,
+                "capability_grants": override["grants"],
+                "capability_revocations": override["revocations"],
+            }
+        },
+    )
+    return {"message": "Project lead transferred", "user_id": str(target_id)}
 
 
 @router.get("/{project_id}/members")
