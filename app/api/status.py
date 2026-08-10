@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from app.api.permissions import (
     SUPER_ADMIN_ROLES,
@@ -76,13 +77,19 @@ def create_status(
 
     status = {
         "name": payload.name,
+        "name_key": _normalize_status_name(payload.name),
         "order": payload.order,
         "key": payload.key or _normalize_status_name(payload.name),
         "category": payload.category
         or _status_category(payload.key or _normalize_status_name(payload.name)),
         "created_at": datetime.now(timezone.utc),
     }
-    result = statuses_collection.insert_one(status)
+    try:
+        result = statuses_collection.insert_one(status)
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409, detail="Status name or order already exists"
+        )
     status["_id"] = str(result.inserted_id)
     return status
 

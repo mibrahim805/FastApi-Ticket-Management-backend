@@ -651,7 +651,11 @@ def add_workflow_transition(
             "created_by": str(current_user["_id"]),
         }
     )
-    result = transitions_collection.insert_one(document)
+    document["name_key"] = document["name"].strip().casefold()
+    try:
+        result = transitions_collection.insert_one(document)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Transition already exists")
     document["_id"] = result.inserted_id
     return _serialize_transition(document)
 
@@ -899,15 +903,20 @@ def add_project_member(
         )
 
     override = _permission_override(project, member.role.value)
-    result = project_members_collection.insert_one(
-        {
-            "project_id": project_object_id,
-            "user_id": member_user_id,
-            "role": member.role.value,
-            "capability_grants": override["grants"],
-            "capability_revocations": override["revocations"],
-        }
-    )
+    try:
+        result = project_members_collection.insert_one(
+            {
+                "project_id": project_object_id,
+                "user_id": member_user_id,
+                "role": member.role.value,
+                "capability_grants": override["grants"],
+                "capability_revocations": override["revocations"],
+            }
+        )
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409, detail="User is already a member of this project"
+        )
     log_project_activity(
         project_id=str(project_object_id),
         action="project_member_added",

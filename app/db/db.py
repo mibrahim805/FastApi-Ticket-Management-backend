@@ -48,11 +48,41 @@ SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
 TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
 TICKET_BACKLOG_ORDER_INDEX = "tickets_project_backlog_position"
 SUPER_ADMIN_UNIQUE_INDEX = "users_one_super_admin"
+USER_EMAIL_UNIQUE_INDEX = "users_email_key_unique"
+MEMBERSHIP_UNIQUE_INDEX = "project_members_project_user_unique"
+COMPONENT_PROJECT_NAME_INDEX = "project_components_project_name_unique"
+STATUS_NAME_INDEX = "statuses_name_key_unique"
+STATUS_ORDER_INDEX = "statuses_order_unique"
 LEGACY_INERT_GLOBAL_ROLES = frozenset({"user", "customer", "agent"})
 
 
 def ensure_database_indexes() -> None:
     """Create the indexes required for application-level invariants."""
+    user_collection.create_index(
+        [("email_key", ASCENDING)],
+        name=USER_EMAIL_UNIQUE_INDEX,
+        unique=True,
+        partialFilterExpression={"email_key": {"$type": "string"}},
+    )
+    for collection, keys, name in [
+        (
+            project_members_collection,
+            [("project_id", ASCENDING), ("user_id", ASCENDING)],
+            MEMBERSHIP_UNIQUE_INDEX,
+        ),
+        (
+            project_components_collection,
+            [("project_id", ASCENDING), ("name_key", ASCENDING)],
+            COMPONENT_PROJECT_NAME_INDEX,
+        ),
+        (statuses_collection, [("name_key", ASCENDING)], STATUS_NAME_INDEX),
+        (statuses_collection, [("order", ASCENDING)], STATUS_ORDER_INDEX),
+    ]:
+        if hasattr(collection, "create_index"):
+            options = {"name": name, "unique": True}
+            if keys[-1][0] != "order":
+                options["partialFilterExpression"] = {keys[-1][0]: {"$type": "string"}}
+            collection.create_index(keys, **options)
     user_collection.create_index(
         [("role", ASCENDING)],
         name=SUPER_ADMIN_UNIQUE_INDEX,
@@ -83,8 +113,10 @@ def ensure_database_indexes() -> None:
         name=ISSUE_LINK_TO_TICKET_INDEX,
     )
     transitions_collection.create_index(
-        [("project_id", ASCENDING), ("name", ASCENDING)],
+        [("project_id", ASCENDING), ("name_key", ASCENDING)],
         name=TRANSITION_PROJECT_NAME_INDEX,
+        unique=True,
+        partialFilterExpression={"name_key": {"$type": "string"}},
     )
     transitions_collection.create_index(
         [("project_id", ASCENDING), ("from_status_ids", ASCENDING)],

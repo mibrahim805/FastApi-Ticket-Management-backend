@@ -61,6 +61,7 @@ def register_super_admin(user: SuperAdminRegister):
     super_admin_user = {
         "username": user.name,
         "email": user.email,
+        "email_key": user.email.casefold(),
         "hashed_password": hashed_password,
         "role": "super_admin",
         "is_active": True,
@@ -93,11 +94,15 @@ def register(user: UserRegister):
     user_data = {
         "name": user.name,
         "email": user.email,
+        "email_key": user.email.casefold(),
         "hashed_password": hashed_password,
         "is_active": user.is_active,
     }
 
-    user_collection.insert_one(user_data)
+    try:
+        user_collection.insert_one(user_data)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Email already registered")
     return {"message": "User registered successfully"}
 
 
@@ -121,12 +126,16 @@ def register_admin(
     user_data = {
         "name": user.name,
         "email": user.email,
+        "email_key": user.email.casefold(),
         "hashed_password": hashed_password,
         "role": GlobalRole.ADMIN.value,
         "is_active": user.is_active,
     }
 
-    user_collection.insert_one(user_data)
+    try:
+        user_collection.insert_one(user_data)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Email already registered")
     return {"message": "Admin registered successfully"}
 
 
