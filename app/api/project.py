@@ -772,6 +772,14 @@ def assign_statuses_to_project(
         str(status_id) for status_id in project.get("assigned_statuses", [])
     }
     removed_status_ids = existing_status_ids - set(payload.status_ids)
+    migration_ids = [
+        migration.remove_status_id for migration in payload.status_migrations
+    ]
+    if len(migration_ids) != len(set(migration_ids)):
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate status migrations are not allowed",
+        )
     migrations = {
         migration.remove_status_id: migration.move_existing_tickets_to
         for migration in payload.status_migrations
@@ -817,7 +825,7 @@ def assign_statuses_to_project(
     for removed_status_id, target_status_id in migrations.items():
         ticket_collection.update_many(
             {
-                "project_id": str(project_object_id),
+                "project_id": {"$in": [str(project_object_id), project_object_id]},
                 "current_status_id": removed_status_id,
             },
             {
