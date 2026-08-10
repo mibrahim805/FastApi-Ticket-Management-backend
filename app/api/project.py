@@ -1,4 +1,5 @@
 import re
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -20,6 +21,7 @@ from app.api.permissions import (
     role_has_permission,
     serialize_capabilities,
 )
+from app.db.db import client as mongo_client
 from app.db.db import (
     project_components_collection,
     project_members_collection,
@@ -577,6 +579,7 @@ def configure_project_workflow(
 
         transition_document = transition.model_dump(mode="json")
         transition_document["project_id"] = project_object_id
+        transition_document["name_key"] = transition_document["name"].strip().casefold()
         transition_document["from_status_ids"] = from_status_ids
         transition_document["to_status_id"] = to_status_id
         transition_document["guard"]["allowed_roles"] = list(
@@ -587,23 +590,29 @@ def configure_project_workflow(
         transition_document["created_by"] = str(current_user["_id"])
         transitions.append(transition_document)
 
-    transitions_collection.delete_many({"project_id": project_object_id})
-    stored_transitions = []
-    for transition in transitions:
-        result = transitions_collection.insert_one(transition)
-        transition["_id"] = result.inserted_id
-        stored_transitions.append(_serialize_transition(transition))
-
-    projects_collection.update_one(
-        {"_id": project_object_id},
-        {
-            "$set": {
-                "updated_at": now,
-                "updated_by": str(current_user["_id"]),
-            },
-            "$unset": {"workflow_transitions": ""},
-        },
-    )
+    transaction = nullcontext(None)
+    if hasattr(transitions_collection, "database"):
+        transaction = mongo_client.start_session()
+    with transaction as session:
+        context = session.start_transaction() if session is not None else nullcontext()
+        with context:
+            options = {"session": session} if session is not None else {}
+            transitions_collection.delete_many(
+                {"project_id": project_object_id}, **options
+            )
+            stored_transitions = []
+            for transition in transitions:
+                result = transitions_collection.insert_one(transition, **options)
+                transition["_id"] = result.inserted_id
+                stored_transitions.append(_serialize_transition(transition))
+            projects_collection.update_one(
+                {"_id": project_object_id},
+                {
+                    "$set": {"updated_at": now, "updated_by": str(current_user["_id"])},
+                    "$unset": {"workflow_transitions": ""},
+                },
+                **options,
+            )
     return {"project_id": project_id, "transitions": stored_transitions}
 
 
