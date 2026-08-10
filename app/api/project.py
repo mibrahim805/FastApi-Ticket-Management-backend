@@ -514,9 +514,15 @@ def delete_project_component(
 ):
     project_object_id, _ = _get_project_or_404(project_id)
     _require_project_admin(project_object_id, current_user)
+    component_object_id = parse_object_id(component_id, "component_id")
+    if ticket_collection.find_one({"component_ids": component_object_id}):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a component referenced by tickets",
+        )
     result = project_components_collection.delete_one(
         {
-            "_id": parse_object_id(component_id, "component_id"),
+            "_id": component_object_id,
             "project_id": project_object_id,
         }
     )

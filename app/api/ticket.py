@@ -30,6 +30,7 @@ from app.db.db import (
     issue_links_collection,
     notification_preferences_collection,
     notifications_collection,
+    project_components_collection,
     project_members_collection,
     projects_collection,
     sprints_collection,
@@ -101,13 +102,37 @@ def _serialize_ticket(ticket: dict) -> dict:
     serialized.setdefault("epic_id", None)
     serialized.setdefault("parent_id", None)
     serialized.setdefault("labels", [])
-    serialized.setdefault("components", [])
+    component_ids = serialized.get("component_ids", [])
+    serialized["component_ids"] = [str(value) for value in component_ids]
+    if "components" not in serialized:
+        serialized["components"] = [
+            item["name"]
+            for item in project_components_collection.find(
+                {"_id": {"$in": component_ids}}
+            )
+        ]
     serialized.setdefault("watchers", [])
     serialized.setdefault("sprint_id", None)
     serialized.setdefault("story_points", None)
     serialized.setdefault("backlog_position", None)
     serialized.setdefault("board_position", 0)
     return serialized
+
+
+def _validate_component_ids(project_id, values):
+    ids = [_parse_object_id(value, "component_id") for value in values]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="Component IDs must be unique")
+    found = list(
+        project_components_collection.find(
+            {"project_id": project_id, "_id": {"$in": ids}}
+        )
+    )
+    if len(found) != len(ids):
+        raise HTTPException(
+            status_code=400, detail="Component must belong to the project"
+        )
+    return ids
 
 
 def _serialize_issue_link(link: dict) -> dict:
@@ -490,6 +515,7 @@ def create_ticket(
         )
     next_number = _next_project_ticket_number(project)
     ticket_code = f"{project_key}-{next_number}"
+    component_ids = _validate_component_ids(project["_id"], payload.components)
 
     ticket = {
         "project_id": str(project["_id"]),
@@ -503,7 +529,7 @@ def create_ticket(
         "epic_id": epic_id,
         "parent_id": parent_id,
         "labels": list(payload.labels),
-        "components": list(payload.components),
+        "component_ids": component_ids,
         "watchers": [],
         "sprint_id": None,
         "story_points": payload.story_points,
@@ -932,6 +958,12 @@ def update_ticket(
     update_data = data.model_dump(exclude_none=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No ticket fields supplied")
+
+    if "components" in update_data:
+        update_data["component_ids"] = _validate_component_ids(
+            _parse_object_id(ticket["project_id"], "project_id"),
+            update_data.pop("components"),
+        )
 
     if "parent_id" in update_data:
         if ticket.get("issue_type") != IssueType.SUBTASK.value:
