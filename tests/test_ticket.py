@@ -16,6 +16,35 @@ from app.models.ticket import (
 )
 
 
+def test_serialize_legacy_ticket_resolves_component_names(fake_collection, monkeypatch):
+    component_id = ObjectId()
+    components = fake_collection.__class__([{"_id": component_id, "name": "Frontend"}])
+    monkeypatch.setattr(ticket, "project_components_collection", components)
+
+    serialized = ticket._serialize_ticket(
+        {"_id": ObjectId(), "component_ids": [component_id]}
+    )
+
+    assert serialized["component_ids"] == [str(component_id)]
+    assert serialized["components"] == ["Frontend"]
+
+
+def test_serialize_ticket_preserves_explicit_components_without_database_lookup(
+    monkeypatch,
+):
+    class NoDatabaseAccess:
+        def find(self, *_args, **_kwargs):
+            raise AssertionError("component lookup was not expected")
+
+    monkeypatch.setattr(ticket, "project_components_collection", NoDatabaseAccess())
+    serialized = ticket._serialize_ticket(
+        {"_id": ObjectId(), "components": [], "component_ids": []}
+    )
+
+    assert serialized["components"] == []
+    assert serialized["component_ids"] == []
+
+
 @pytest.mark.parametrize(
     "priority, days",
     [

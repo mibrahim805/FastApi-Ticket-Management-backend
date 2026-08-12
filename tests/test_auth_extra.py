@@ -13,7 +13,7 @@ from app.models.registration import (
 )
 
 
-def test_create_and_verify_password_reset_token(monkeypatch, fake_collection):
+def test_create_password_reset_token_is_consumed_once(fake_collection):
     reset_tokens = fake_collection.__class__()
     user = {"_id": ObjectId(), "email": "u@example.com"}
 
@@ -29,13 +29,11 @@ def test_create_and_verify_password_reset_token(monkeypatch, fake_collection):
     assert "token" not in record
     assert record["user_id"] == str(user["_id"])
 
-    # valid token verifies
-    verified = registration.verify_password_reset_token(reset_tokens, token)
-    assert verified is not None
-
-    # used token returns None
-    reset_tokens.documents[0]["used"] = True
-    assert registration.verify_password_reset_token(reset_tokens, token) is None
+    # valid token is returned once and atomically marked used
+    consumed = registration.consume_password_reset_token(reset_tokens, token)
+    assert consumed is not None
+    assert consumed["user_id"] == str(user["_id"])
+    assert registration.consume_password_reset_token(reset_tokens, token) is None
 
 
 def test_password_reset_token_can_only_be_consumed_once(fake_collection):
@@ -49,7 +47,11 @@ def test_password_reset_token_can_only_be_consumed_once(fake_collection):
     # expired token returns None
     reset_tokens.documents[0]["used"] = False
     reset_tokens.documents[0]["expires_at"] = datetime.utcnow() - timedelta(minutes=1)
-    assert registration.verify_password_reset_token(reset_tokens, token) is None
+    assert registration.consume_password_reset_token(reset_tokens, token) is None
+
+
+def test_password_reset_token_rejects_invalid_token(fake_collection):
+    assert registration.consume_password_reset_token(fake_collection, "invalid") is None
 
 
 def test_request_password_reset_messages(monkeypatch, fake_collection):

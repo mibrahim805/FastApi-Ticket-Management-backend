@@ -93,6 +93,7 @@ class FakeCollection:
         self.inserted_documents: list[dict[str, Any]] = []
         self.updated_documents: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.deleted_queries: list[dict[str, Any]] = []
+        self.indexes: list[tuple[Any, dict[str, Any]]] = []
 
     def find_one(self, query, projection=None):
         if isinstance(query, ObjectId):
@@ -177,6 +178,13 @@ class FakeCollection:
 
     def aggregate(self, pipeline):
         return []
+
+    def create_index(self, keys, **options):
+        self.indexes.append((keys, options))
+        return options.get("name")
+
+    def drop_index(self, name):
+        self.indexes = [item for item in self.indexes if item[1].get("name") != name]
 
     def find(self, query=None):
         query = query or {}
@@ -298,6 +306,22 @@ def isolate_project_members_collection(monkeypatch, project_members):
             monkeypatch.setattr(module, "project_members_collection", project_members)
 
     return project_members
+
+
+@pytest.fixture(autouse=True)
+def isolate_all_database_collections(monkeypatch):
+    """Ensure an endpoint or startup helper cannot reach the real Mongo client."""
+    import app.db.db as database
+
+    collection_names = (name for name in vars(database) if name.endswith("_collection"))
+    replacements = {name: FakeCollection() for name in collection_names}
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        for name, replacement in replacements.items():
+            if getattr(module, name, None) is getattr(database, name, object()):
+                monkeypatch.setattr(module, name, replacement, raising=False)
+    return replacements
 
 
 @pytest.fixture(autouse=True)

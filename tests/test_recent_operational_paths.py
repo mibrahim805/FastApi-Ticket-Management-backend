@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from bson import ObjectId
@@ -8,13 +9,13 @@ from pymongo.errors import OperationFailure
 from app.api import permissions, project, status
 from app.api.project import ComponentCreate
 from app.db import db
-from app.main import health_live
+from app.main import app, health_live
 from app.models.project import ProjectMemberRole
 from app.models.project_member import ProjectMemberRoleUpdate, ProjectMemberSuspension
 
 
 def test_status_invalid_id_is_controlled_error(fake_collection, monkeypatch):
-    monkeypatch.setattr(status, db.statuses_collection, fake_collection.__class__())
+    monkeypatch.setattr(status, "statuses_collection", fake_collection.__class__())
     with pytest.raises(HTTPException) as error:
         status.update_status(
             "not-an-object-id",
@@ -65,6 +66,17 @@ def test_index_reconciliation_recreates_conflicting_index():
 
 def test_liveness_endpoint():
     assert asyncio.run(health_live()) == {"status": "ok"}
+
+
+def test_container_health_checks_use_exposed_readiness_endpoint():
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text()
+
+    assert "/health/ready" in dockerfile
+    assert "/health/ready" in compose
+    assert "/health" not in dockerfile.replace("/health/ready", "")
+    assert "/health" not in compose.replace("/health/ready", "")
+    assert "/health/ready" in app.openapi()["paths"]
 
 
 def test_project_component_lifecycle_and_reference_guard(monkeypatch, fake_collection):
