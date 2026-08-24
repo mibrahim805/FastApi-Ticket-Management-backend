@@ -267,3 +267,50 @@ def test_register_admin_duplicate_email(
         )
 
     assert exc_info.value.status_code == 400
+
+
+def test_register_raises_duplicate_key_error(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    # Mock insert_one to raise DuplicateKeyError
+    def raise_duplicate_key(_document):
+        raise DuplicateKeyError("Email already registered")
+
+    monkeypatch.setattr(fake_collection, "insert_one", raise_duplicate_key)
+
+    payload = UserRegister(
+        name="User",
+        email="new@example.com",
+        password="secret-password",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register(payload)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Email already registered"
+
+
+def test_register_admin_raises_duplicate_key_error(monkeypatch, fake_collection):
+    monkeypatch.setattr(registration, "user_collection", fake_collection)
+
+    # Mock insert_one to raise DuplicateKeyError
+    def raise_duplicate_key(_document):
+        raise DuplicateKeyError("Email already registered")
+
+    monkeypatch.setattr(fake_collection, "insert_one", raise_duplicate_key)
+
+    payload = AdminRegister(
+        name="Admin",
+        email="new-admin@example.com",
+        password="secret-password",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registration.register_admin(
+            payload,
+            current_user={"role": GlobalRole.SUPER_ADMIN.value},
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Email already registered"
