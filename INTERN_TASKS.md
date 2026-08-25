@@ -15,7 +15,7 @@ The following review items are implemented in the current codebase:
 The container health checks use `/health/ready`, which checks MongoDB and
 attachment storage. `/health/live` is reserved for process liveness checks.
 
-The repaired test suite currently reports **360 passed**.
+The repaired test suite currently reports **362 passed**.
 
 Recent implementation commits include:
 
