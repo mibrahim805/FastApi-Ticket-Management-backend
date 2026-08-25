@@ -313,9 +313,7 @@ def isolate_all_database_collections(monkeypatch):
     """Ensure an endpoint or startup helper cannot reach the real Mongo client."""
     import app.db.db as database
 
-    collection_names = [
-        name for name in vars(database) if name.endswith("_collection")
-    ]
+    collection_names = [name for name in vars(database) if name.endswith("_collection")]
     original_collections = {name: getattr(database, name) for name in collection_names}
     replacements = {name: FakeCollection() for name in collection_names}
     for module in list(sys.modules.values()):
