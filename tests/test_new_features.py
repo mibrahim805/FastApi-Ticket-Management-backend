@@ -1,5 +1,8 @@
 """Test cases for new features"""
 
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
@@ -138,6 +141,50 @@ class TestNotificationEndpoints:
 
         assert response["message"] == "Notification marked as read"
         assert notifications.documents[0]["is_read"] is True
+
+    def test_notification_stream_emits_only_events_after_last_event(
+        self,
+        monkeypatch,
+        fake_collection,
+    ):
+        user_id = ObjectId()
+        first_id = ObjectId()
+        second_id = ObjectId()
+        notifications = fake_collection.__class__(
+            [
+                {
+                    "_id": first_id,
+                    "user_id": str(user_id),
+                    "event_type": "ticket_created",
+                    "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                },
+                {
+                    "_id": second_id,
+                    "user_id": str(user_id),
+                    "event_type": "ticket_updated",
+                    "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+                },
+            ]
+        )
+        monkeypatch.setattr(notif_mod, "notifications_collection", notifications)
+
+        class ConnectedRequest:
+            async def is_disconnected(self):
+                return False
+
+        async def read_event():
+            stream = notif_mod._notification_event_stream(
+                ConnectedRequest(), str(user_id), str(first_id)
+            )
+            event = await anext(stream)
+            await stream.aclose()
+            return event
+
+        event = asyncio.run(read_event())
+
+        assert f"id: {second_id}" in event
+        assert "event: notification" in event
+        assert '"event_type":"ticket_updated"' in event
 
 
 class TestReportsEndpoints:

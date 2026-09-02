@@ -1,9 +1,13 @@
+import asyncio
+import json
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
 from app.api.auth import get_current_user
@@ -23,6 +27,10 @@ from app.models.notifications import (
 )
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+SSE_POLL_INTERVAL_SECONDS = 1
+SSE_HEARTBEAT_INTERVAL_SECONDS = 15
+SSE_BATCH_SIZE = 100
 
 
 def _parse_object_id(value: str, field_name: str) -> ObjectId:
@@ -58,6 +66,138 @@ def _serialize_preference(preference: dict) -> dict:
     )
     serialized["available_event_types"] = sorted(NOTIFICATION_EVENT_TYPES)
     return serialized
+
+
+def _notification_cursor(notification: dict) -> tuple:
+    """Return the position used to order notification stream events."""
+    return notification.get("created_at"), str(notification["_id"])
+
+
+def _notification_sort_key(notification: dict) -> tuple[str, str]:
+    created_at = notification.get("created_at")
+    if isinstance(created_at, datetime):
+        created_at = created_at.astimezone(timezone.utc).isoformat()
+    return str(created_at or ""), str(notification["_id"])
+
+
+def _get_stream_start_cursor(
+    user_id: str,
+    last_event_id: Optional[str],
+) -> Optional[tuple]:
+    """Find the event position from which an SSE connection should continue."""
+    if last_event_id:
+        try:
+            last_notification = notifications_collection.find_one(
+                {"_id": ObjectId(last_event_id), "user_id": user_id}
+            )
+        except (InvalidId, TypeError):
+            last_notification = None
+
+        if last_notification:
+            return _notification_cursor(last_notification)
+
+    # A new connection starts after the current latest notification. This
+    # prevents the whole notification history from being replayed on connect.
+    latest = list(
+        notifications_collection.find({"user_id": user_id})
+        .sort("created_at", -1)
+        .limit(1)
+    )
+    if not latest:
+        return None
+
+    latest_created_at = latest[0].get("created_at")
+    same_timestamp = list(
+        notifications_collection.find(
+            {"user_id": user_id, "created_at": latest_created_at}
+        )
+        .sort("_id", -1)
+        .limit(1)
+    )
+    return _notification_cursor(same_timestamp[0] if same_timestamp else latest[0])
+
+
+def _find_notifications_after(user_id: str, cursor: Optional[tuple]) -> list[dict]:
+    query = {"user_id": user_id}
+    if cursor is not None:
+        created_at, notification_id = cursor
+        query["$or"] = [
+            {"created_at": {"$gt": created_at}},
+            {"created_at": created_at, "_id": {"$gt": ObjectId(notification_id)}},
+        ]
+
+    notifications = list(
+        notifications_collection.find(query).sort("created_at", 1).limit(SSE_BATCH_SIZE)
+    )
+    return sorted(notifications, key=_notification_sort_key)
+
+
+def _json_default(value):
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, ObjectId):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _format_sse_notification(notification: dict) -> str:
+    event_id = str(notification["_id"])
+    payload = dict(notification)
+    payload["_id"] = event_id
+    data = json.dumps(payload, default=_json_default, separators=(",", ":"))
+    return f"id: {event_id}\nevent: notification\ndata: {data}\n\n"
+
+
+async def _notification_event_stream(
+    request: Request,
+    user_id: str,
+    last_event_id: Optional[str],
+):
+    cursor = await asyncio.to_thread(_get_stream_start_cursor, user_id, last_event_id)
+    last_heartbeat = time.monotonic()
+
+    while not await request.is_disconnected():
+        new_notifications = await asyncio.to_thread(
+            _find_notifications_after,
+            user_id,
+            cursor,
+        )
+        if new_notifications:
+            for notification in new_notifications:
+                if await request.is_disconnected():
+                    return
+                cursor = _notification_cursor(notification)
+                yield _format_sse_notification(notification)
+            last_heartbeat = time.monotonic()
+            continue
+
+        now = time.monotonic()
+        if now - last_heartbeat >= SSE_HEARTBEAT_INTERVAL_SECONDS:
+            yield ": keep-alive\n\n"
+            last_heartbeat = now
+        await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
+
+
+@router.get("/stream", tags=["Notifications"])
+async def stream_notifications(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
+):
+    """Stream newly created notifications for the authenticated user."""
+    return StreamingResponse(
+        _notification_event_stream(
+            request,
+            str(current_user["_id"]),
+            last_event_id,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/", tags=["Notifications"])

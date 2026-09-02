@@ -41,6 +41,7 @@ ISSUE_LINK_TO_TICKET_INDEX = "issue_links_to_ticket"
 TRANSITION_PROJECT_NAME_INDEX = "transitions_project_name"
 TRANSITION_PROJECT_SOURCE_INDEX = "transitions_project_source"
 NOTIFICATION_PREFERENCE_UNIQUE_INDEX = "notification_preferences_user_project_unique"
+NOTIFICATION_STREAM_INDEX = "notifications_user_created_at"
 SAVED_FILTER_USER_NAME_INDEX = "saved_filters_user_name_unique"
 RATE_LIMIT_EXPIRY_INDEX = "rate_limits_expiry_ttl"
 RESET_TOKEN_EXPIRY_INDEX = "reset_tokens_expiry_ttl"
@@ -147,6 +148,10 @@ def ensure_database_indexes() -> None:
         [("user_id", ASCENDING), ("project_id", ASCENDING)],
         name=NOTIFICATION_PREFERENCE_UNIQUE_INDEX,
         unique=True,
+    )
+    notifications_collection.create_index(
+        [("user_id", ASCENDING), ("created_at", ASCENDING)],
+        name=NOTIFICATION_STREAM_INDEX,
     )
     saved_filters_collection.create_index(
         [("user_id", ASCENDING), ("name_key", ASCENDING)],
