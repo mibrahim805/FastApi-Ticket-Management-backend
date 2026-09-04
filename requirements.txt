@@ -16,6 +16,9 @@ et_xmlfile==2.0.0
 exceptiongroup==1.3.1
 fastapi==0.137.2
 fastapi-mongo-admin==2.0.2
+grpcio==1.78.0
+grpcio-tools==1.78.0
+protobuf==6.33.6
 filelock==3.29.4
 h11==0.16.0
 identify==2.6.19

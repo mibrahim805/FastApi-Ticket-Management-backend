@@ -20,7 +20,7 @@ COPY --chown=appuser:appuser . .
 
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8000 50051
 
 HEALTHCHECK CMD curl -f http://localhost:8000/health/ready || exit 1
 

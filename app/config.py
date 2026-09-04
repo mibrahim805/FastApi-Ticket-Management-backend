@@ -66,6 +66,8 @@ class Settings(BaseSettings):
         validation_alias="TRUSTED_PROXY_IPS",
         description="Comma-separated trusted proxy IPs or CIDR networks",
     )
+    grpc_host: str = Field(default="0.0.0.0", validation_alias="GRPC_HOST")
+    grpc_port: int = Field(default=50051, ge=1, le=65535, validation_alias="GRPC_PORT")
 
 
 @lru_cache

@@ -16,6 +16,7 @@ from app.api import (
     ticket_attachment,
 )
 from app.api.ticket_attachment import get_attachment_storage
+from app.config import get_settings
 from app.db.db import client as mongo_client
 from app.db.db import (
     ensure_database_indexes,
@@ -23,6 +24,7 @@ from app.db.db import (
     migrate_legacy_workflow_transitions,
     migrate_status_metadata,
 )
+from app.grpc.notification_service import create_grpc_server
 from app.storage.attachments import LocalAttachmentStorage
 
 
@@ -32,7 +34,13 @@ async def lifespan(_: FastAPI):
     migrate_legacy_global_roles()
     migrate_status_metadata()
     migrate_legacy_workflow_transitions()
-    yield
+    settings = get_settings()
+    grpc_server = create_grpc_server(settings.grpc_host, settings.grpc_port)
+    await grpc_server.start()
+    try:
+        yield
+    finally:
+        await grpc_server.stop(grace=5)
 
 
 # from uploads import ticket_attachment
