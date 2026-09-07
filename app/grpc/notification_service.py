@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from app.api import auth
 from app.api import notifications as notifications_api
+from app.api.notification_stream import notification_broker
 from app.grpc import notification_pb2, notification_pb2_grpc
 
 
@@ -75,27 +76,38 @@ class NotificationService(notification_pb2_grpc.NotificationServiceServicer):
         user = await _authenticate(context)
         user_id = str(user["_id"])
         last_event_id = request.last_event_id or None
-        cursor = await asyncio.to_thread(
-            notifications_api._get_stream_start_cursor,
-            user_id,
-            last_event_id,
-        )
-
-        while not context.done():
-            new_notifications = await asyncio.to_thread(
-                notifications_api._find_notifications_after,
+        async with notification_broker.subscribe(user_id) as subscription:
+            cursor = await asyncio.to_thread(
+                notifications_api._get_stream_start_cursor,
                 user_id,
-                cursor,
+                last_event_id,
             )
-            if new_notifications:
-                for notification in new_notifications:
+            while True:
+                pending = await asyncio.to_thread(
+                    notifications_api._find_notifications_after,
+                    user_id,
+                    cursor,
+                )
+                for notification in pending:
                     if context.done():
                         return
                     cursor = notifications_api._notification_cursor(notification)
                     yield _to_proto(notification)
-                continue
+                if len(pending) < notifications_api.SSE_BATCH_SIZE:
+                    break
 
-            await asyncio.sleep(self.poll_interval_seconds)
+            while not context.done():
+                try:
+                    notification = await asyncio.wait_for(
+                        subscription.get(),
+                        timeout=max(self.poll_interval_seconds, 15.0),
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if not notifications_api._is_notification_after(notification, cursor):
+                    continue
+                cursor = notifications_api._notification_cursor(notification)
+                yield _to_proto(notification)
 
 
 def create_grpc_server(host: str, port: int) -> grpc.aio.Server:

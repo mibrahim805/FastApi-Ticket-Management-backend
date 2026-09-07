@@ -1,3 +1,4 @@
+from app.api.notification_stream import notification_broker
 from app.models.notifications import Notifications
 
 
@@ -55,6 +56,8 @@ def create_notification(
         actor_id=str(actor_id) if actor_id is not None else None,
         event_type=event_type,
     )
-    return notifications_collection.insert_one(
-        notification.model_dump(exclude_none=True)
-    )
+    document = notification.model_dump(exclude_none=True)
+    result = notifications_collection.insert_one(document)
+    document["_id"] = result.inserted_id
+    notification_broker.publish(document)
+    return result

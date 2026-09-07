@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -11,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
 from app.api.auth import get_current_user
+from app.api.notification_stream import notification_broker
 from app.api.permissions import (
     Capability,
     require_project_capability,
@@ -28,7 +28,6 @@ from app.models.notifications import (
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
-SSE_POLL_INTERVAL_SECONDS = 1
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15
 SSE_BATCH_SIZE = 100
 
@@ -153,29 +152,52 @@ async def _notification_event_stream(
     user_id: str,
     last_event_id: Optional[str],
 ):
-    cursor = await asyncio.to_thread(_get_stream_start_cursor, user_id, last_event_id)
-    last_heartbeat = time.monotonic()
-
-    while not await request.is_disconnected():
-        new_notifications = await asyncio.to_thread(
-            _find_notifications_after,
+    async with notification_broker.subscribe(user_id) as subscription:
+        cursor = await asyncio.to_thread(
+            _get_stream_start_cursor,
             user_id,
-            cursor,
+            last_event_id,
         )
-        if new_notifications:
-            for notification in new_notifications:
+
+        # Read missed events on connect. New inserts are delivered by the
+        # subscription, so idle connections do not poll MongoDB.
+        while True:
+            pending = await asyncio.to_thread(
+                _find_notifications_after,
+                user_id,
+                cursor,
+            )
+            for notification in pending:
                 if await request.is_disconnected():
                     return
                 cursor = _notification_cursor(notification)
                 yield _format_sse_notification(notification)
-            last_heartbeat = time.monotonic()
-            continue
+            if len(pending) < SSE_BATCH_SIZE:
+                break
 
-        now = time.monotonic()
-        if now - last_heartbeat >= SSE_HEARTBEAT_INTERVAL_SECONDS:
-            yield ": keep-alive\n\n"
-            last_heartbeat = now
-        await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
+        while not await request.is_disconnected():
+            try:
+                notification = await asyncio.wait_for(
+                    subscription.get(),
+                    timeout=SSE_HEARTBEAT_INTERVAL_SECONDS,
+                )
+            except TimeoutError:
+                if not await request.is_disconnected():
+                    yield ": keep-alive\n\n"
+                continue
+
+            if not _is_notification_after(notification, cursor):
+                continue
+            cursor = _notification_cursor(notification)
+            yield _format_sse_notification(notification)
+
+
+def _is_notification_after(notification: dict, cursor: Optional[tuple]) -> bool:
+    if cursor is None:
+        return True
+    return _notification_sort_key(notification) > _notification_sort_key(
+        {"_id": cursor[1], "created_at": cursor[0]}
+    )
 
 
 @router.get("/stream", tags=["Notifications"])
