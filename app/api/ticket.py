@@ -804,7 +804,7 @@ def get_ticket_capabilities(
     }
 
 
-@router.post("/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])
+@router.post("/tickets/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])
 def transition_ticket(
     ticket_id: str,
     transition_id: str,

@@ -226,7 +226,8 @@ def transition_guard_error(
             [ProjectRole.LEAD.value, ProjectRole.MEMBER.value],
         )
     }
-    if not membership or membership.get("role") not in allowed_roles:
+    membership_role = membership.get("role") if membership else None
+    if membership_role != "super_admin" and membership_role not in allowed_roles:
         return 403, "Your project role cannot use this transition"
     if guard.get("requires_assignee") and not ticket.get("assigned_agent"):
         return 400, "Ticket must be assigned before using this transition"
