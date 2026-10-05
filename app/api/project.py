@@ -1125,6 +1125,7 @@ def get_project_members(
                 "name": user.get("username") or user.get("name") or "Unnamed user",
                 "email": user.get("email"),
                 "role": member["role"],
+                "suspended": bool(member.get("suspended", False)),
             }
         )
     return members
