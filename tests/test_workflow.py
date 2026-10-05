@@ -518,7 +518,7 @@ def test_assignment_and_bulk_assignment_write_activity(
 def test_only_transition_id_endpoint_can_change_workflow_status_in_openapi():
     paths = app.openapi()["paths"]
 
-    assert "post" in paths["/{ticket_id}/transitions/{transition_id}"]
+    assert "post" in paths["/tickets/{ticket_id}/transitions/{transition_id}"]
     assert set(paths["/tickets/{ticket_id}/transitions"]) == {"get"}
     assert "/{ticket_id}/move-forward" not in paths
     assert "/tickets/{ticket_id}/status" not in paths
