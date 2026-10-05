@@ -21,6 +21,12 @@ class AdminRegister(UserRegister):
     """Account payload for the one meaningful delegated global role."""
 
 
+class UserManagementCreate(UserRegister):
+    """Payload used by super admins to create a managed account."""
+
+    role: GlobalRole | None = None
+
+
 class SuperAdminRegister(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

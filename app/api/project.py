@@ -234,6 +234,23 @@ def get_project(project_id: str, current_user: dict = Depends(get_current_user))
     return {"project": _serialize_project(project)}
 
 
+@router.get("/{project_id}/available-statuses")
+def get_project_available_statuses(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    return [
+        {
+            "_id": str(status["_id"]),
+            "name": status["name"],
+            "order": status["order"],
+        }
+        for status in statuses_collection.find().sort("order", 1)
+    ]
+
+
 def _permission_override(project: dict, role: str) -> dict:
     override = (project.get("permission_overrides") or {}).get(role) or {}
     return {
@@ -1098,16 +1115,44 @@ def get_project_members(
     for member in project_members_collection.find({"project_id": project_object_id}):
         user = user_collection.find_one(
             {"_id": member["user_id"]},
-            {"name": 1, "email": 1},
+            {"name": 1, "username": 1, "email": 1},
         )
         if not user:
             continue
         members.append(
             {
                 "user_id": str(member["user_id"]),
-                "name": user.get("name"),
+                "name": user.get("username") or user.get("name") or "Unnamed user",
                 "email": user.get("email"),
                 "role": member["role"],
             }
         )
     return members
+
+
+@router.get("/{project_id}/member-candidates")
+def get_project_member_candidates(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    project_object_id, _ = _get_project_or_404(project_id)
+    _require_project_admin(project_object_id, current_user)
+    member_ids = {
+        member["user_id"]
+        for member in project_members_collection.find(
+            {"project_id": project_object_id}, {"user_id": 1}
+        )
+    }
+    candidates = []
+    for user in user_collection.find(
+        {"_id": {"$nin": list(member_ids)}, "is_active": {"$ne": False}},
+        {"name": 1, "username": 1, "email": 1},
+    ):
+        candidates.append(
+            {
+                "user_id": str(user["_id"]),
+                "name": user.get("username") or user.get("name") or "Unnamed user",
+                "email": user.get("email", ""),
+            }
+        )
+    return candidates

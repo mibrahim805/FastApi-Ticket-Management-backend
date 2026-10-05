@@ -33,6 +33,7 @@ from app.models.registration import (
     ResetPasswordRequest,
     SuperAdminRegister,
     UserLogin,
+    UserManagementCreate,
     UserRegister,
     UserUpdate,
 )
@@ -162,6 +163,69 @@ def login(user: UserLogin):
         }
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.get("/me", tags=["Auth"])
+def get_profile(current_user: dict = Depends(get_current_user)):
+    return {
+        "username": current_user.get("username") or current_user.get("name") or "User",
+        "email": current_user.get("email"),
+        "role": current_user.get("role"),
+    }
+
+
+@router.get("/users", tags=["Auth"])
+def list_users(current_user: dict = Depends(_require_super_admin)):
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super admin can manage users",
+    )
+    users = []
+    for user in user_collection.find({}, {"hashed_password": 0, "token_version": 0}):
+        users.append(
+            {
+                "id": str(user["_id"]),
+                "name": user.get("username") or user.get("name") or "Unnamed user",
+                "email": user.get("email", ""),
+                "role": user.get("role"),
+                "is_active": user.get("is_active", True),
+            }
+        )
+    return {"users": users}
+
+
+@router.post("/users", tags=["Auth"])
+def create_managed_user(
+    user: UserManagementCreate,
+    current_user: dict = Depends(_require_super_admin),
+):
+    ensure_role(
+        current_user,
+        SUPER_ADMIN_ROLES,
+        detail="Only super admin can manage users",
+    )
+    email = str(user.email)
+    if user_collection.find_one(
+        {"$or": [{"email_key": email.casefold()}, {"email": email}]}
+    ):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user_data = {
+        "name": user.name,
+        "email": email,
+        "email_key": email.casefold(),
+        "hashed_password": hash_password(user.password),
+        "is_active": user.is_active,
+    }
+    if user.role is not None:
+        user_data["role"] = user.role.value
+
+    try:
+        user_collection.insert_one(user_data)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    return {"message": "User created successfully"}
 
 
 @router.put("/activate_or_deactivate/{user_id}", tags=["Auth"])
