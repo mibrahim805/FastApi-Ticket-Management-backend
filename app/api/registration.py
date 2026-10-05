@@ -168,6 +168,7 @@ def login(user: UserLogin):
 @router.get("/me", tags=["Auth"])
 def get_profile(current_user: dict = Depends(get_current_user)):
     return {
+        "user_id": str(current_user["_id"]),
         "username": current_user.get("username") or current_user.get("name") or "User",
         "email": current_user.get("email"),
         "role": current_user.get("role"),
