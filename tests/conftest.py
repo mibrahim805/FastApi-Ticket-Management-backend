@@ -313,6 +313,14 @@ def isolate_all_database_collections(monkeypatch):
     """Ensure an endpoint or startup helper cannot reach the real Mongo client."""
     import app.db.db as database
 
+    #     if module is None:
+    #         continue
+    #     for name, replacement in replacements.items():
+    #         if getattr(module, name, None) is original_collections[name]:
+    #             monkeypatch.setattr(module, name, replacement, raising=False)
+    # return replacements
+
+    collection_names = (name for name in vars(database) if name.endswith("_collection"))
     collection_names = [name for name in vars(database) if name.endswith("_collection")]
     original_collections = {name: getattr(database, name) for name in collection_names}
     replacements = {name: FakeCollection() for name in collection_names}
