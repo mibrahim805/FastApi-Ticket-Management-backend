@@ -20,8 +20,8 @@ COPY --chown=appuser:appuser . .
 
 USER appuser
 
-EXPOSE 8000 50051
+EXPOSE 7000 50051
 
-HEALTHCHECK CMD curl -f http://localhost:8000/health/ready || exit 1
+HEALTHCHECK CMD curl -f http://localhost:7000/health/ready || exit 1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7000"]

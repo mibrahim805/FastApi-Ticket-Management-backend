@@ -220,8 +220,8 @@ Docker Compose starts the API and MongoDB together:
 docker compose up --build
 ```
 
-The API is available at `http://localhost:8000`, with OpenAPI documentation at
-`http://localhost:8000/docs`. Set `SECRET_KEY` in the environment before
+The API is available at `http://localhost:7000`, with OpenAPI documentation at
+`http://localhost:7000/docs`. Set `SECRET_KEY` in the environment before
 starting Compose for anything beyond local development. MongoDB data and local
 attachments use named Docker volumes and survive container restarts.
 
@@ -656,19 +656,19 @@ uvicorn app.main:app --reload
 API
 
 ```
-http://127.0.0.1:8000
+http://127.0.0.1:7000
 ```
 
 Swagger UI
 
 ```
-http://127.0.0.1:8000/docs
+http://127.0.0.1:7000/docs
 ```
 
 ReDoc
 
 ```
-http://127.0.0.1:8000/redoc
+http://127.0.0.1:7000/redoc
 ```
 
 ---

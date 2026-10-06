@@ -162,7 +162,7 @@ def _get_ticket_or_404(ticket_id: str) -> tuple[ObjectId, dict]:
 def _get_epic_or_404(epic_id: str) -> tuple[ObjectId, dict]:
     epic_object_id = _parse_object_id(epic_id, "epic_id")
     epic = ticket_collection.find_one({"_id": epic_object_id})
-    if not epic:
+    if not epic or epic.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Epic not found")
     if epic.get("issue_type") != IssueType.EPIC.value:
         raise HTTPException(status_code=400, detail="Referenced issue is not an epic")
@@ -481,7 +481,7 @@ def create_ticket(
             )
         parent_object_id = _parse_object_id(payload.parent_id, "parent_id")
         parent = ticket_collection.find_one({"_id": parent_object_id})
-        if not parent:
+        if not parent or parent.get("deleted_at") is not None:
             raise HTTPException(status_code=404, detail="Parent issue not found")
         if str(parent.get("project_id")) != str(project["_id"]):
             raise HTTPException(
@@ -602,6 +602,7 @@ def get_epic(
             {
                 "epic_id": str(epic_object_id),
                 "project_id": str(project_object_id),
+                "deleted_at": {"$exists": False},
             }
         )
     )
@@ -836,9 +837,7 @@ def create_ticket_link(
     if to_ticket_object_id == from_ticket_object_id:
         raise HTTPException(status_code=400, detail="A ticket cannot link to itself")
 
-    to_ticket = ticket_collection.find_one({"_id": to_ticket_object_id})
-    if not to_ticket:
-        raise HTTPException(status_code=404, detail="Target ticket not found")
+    _, to_ticket = _get_ticket_or_404(payload.to_ticket_id)
     require_ticket_membership(
         to_ticket,
         current_user,
@@ -941,11 +940,7 @@ def get_ticket_links(
 def update_ticket(
     ticket_id: str, data: TicketUpdate, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}
-    )
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
 
     require_ticket_membership(
         ticket,
@@ -973,7 +968,7 @@ def update_ticket(
             )
         parent_object_id = _parse_object_id(update_data["parent_id"], "parent_id")
         parent = ticket_collection.find_one({"_id": parent_object_id})
-        if not parent:
+        if not parent or parent.get("deleted_at") is not None:
             raise HTTPException(status_code=404, detail="Parent issue not found")
         if str(parent.get("project_id")) != str(ticket.get("project_id")):
             raise HTTPException(
@@ -1003,9 +998,7 @@ def update_ticket(
     ]
     update_data["updated_by"] = str(current_user["_id"])
     update_data["updated_at"] = datetime.now(timezone.utc)
-    ticket_collection.update_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
-    )
+    ticket_collection.update_one({"_id": ticket_object_id}, {"$set": update_data})
 
     create_notification(
         project_id=ticket.get("project_id"),
@@ -1038,11 +1031,7 @@ def update_ticket(
 def assign_ticket(
     ticket_id: str, data: AssignAgent, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}
-    )
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
 
     actor_membership = require_ticket_membership(
         ticket,
@@ -1082,7 +1071,7 @@ def assign_ticket(
         )
 
     ticket_collection.update_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")},
+        {"_id": ticket_object_id},
         {
             "$set": {
                 "assigned_agent": data.agent_id,
@@ -1240,16 +1229,24 @@ def _build_ticket_list_query(
     if labels:
         query["labels"] = {"$all": list(dict.fromkeys(labels))}
     if components:
-        query["components"] = {"$all": list(dict.fromkeys(components))}
+        component_ids = [
+            _parse_object_id(component_id, "component_id")
+            for component_id in dict.fromkeys(components)
+        ]
+        query["component_ids"] = {"$all": component_ids}
     if epic_id:
         query["epic_id"] = str(_parse_object_id(epic_id, "epic_id"))
     if assigned_agent:
         query["assigned_agent"] = assigned_agent
     if overdue_only:
         query["due_date"] = {"$lt": datetime.now(timezone.utc)}
-        query["current_status_id"] = {
-            "$nin": _status_ids_for_categories({"resolved", "closed"})
-        }
+        query.setdefault("$and", []).append(
+            {
+                "current_status_id": {
+                    "$nin": _status_ids_for_categories({"resolved", "closed", "done"})
+                }
+            }
+        )
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)
         query["$or"] = [
@@ -1492,7 +1489,7 @@ def get_tickets(
     current_user: dict = Depends(get_current_user),
 ):
     project = projects_collection.find_one({"code": project_key})
-    if not project:
+    if not project or project.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Project not found")
 
     require_project_membership(
@@ -1570,7 +1567,10 @@ def get_tickets_summary(
     if not project_ids:
         return {}
 
-    query = {"project_id": {"$in": project_ids}}
+    query = {
+        "project_id": {"$in": project_ids},
+        "deleted_at": {"$exists": False},
+    }
 
     pipeline = [
         {"$match": query},

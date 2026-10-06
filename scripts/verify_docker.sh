@@ -21,7 +21,7 @@ echo "Waiting for API readiness (polling /health/ready)..."
 MAX_RETRIES=30
 RETRY_COUNT=0
 # Use -f for fail on HTTP errors. Direct curl in condition.
-until curl -s -f http://localhost:8000/health/ready > /dev/null; do
+until curl -s -f http://localhost:7000/health/ready > /dev/null; do
     if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
         echo "API failed to become ready within timeout."
         docker compose logs api
@@ -36,7 +36,7 @@ echo "API is ready."
 
 # Check live endpoint
 echo "Checking /health/live..."
-if curl -s -f http://localhost:8000/health/live > /dev/null; then
+if curl -s -f http://localhost:7000/health/live > /dev/null; then
     echo "API liveness check passed."
 else
     echo "API liveness check failed."

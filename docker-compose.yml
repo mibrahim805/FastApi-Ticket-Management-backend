@@ -3,12 +3,12 @@ services:
     build:
       context: .
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
+      test: ["CMD", "curl", "-f", "http://localhost:7000/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 5
     ports:
-      - "8000:8000"
+      - "7000:7000"
       - "50051:50051"
     environment:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set explicitly}
