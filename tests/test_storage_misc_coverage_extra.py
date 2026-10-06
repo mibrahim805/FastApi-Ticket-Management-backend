@@ -398,7 +398,11 @@ def test_database_index_creation_calls_every_collection(monkeypatch):
 
     collections = {}
     for name in (
+        "user_collection",
         "projects_collection",
+        "project_members_collection",
+        "project_components_collection",
+        "statuses_collection",
         "issue_links_collection",
         "transitions_collection",
         "notification_preferences_collection",
@@ -414,6 +418,9 @@ def test_database_index_creation_calls_every_collection(monkeypatch):
     database.ensure_database_indexes()
 
     assert len(collections["projects_collection"].calls) == 1
+    assert len(collections["project_members_collection"].calls) == 1
+    assert len(collections["project_components_collection"].calls) == 1
+    assert len(collections["statuses_collection"].calls) == 2
     assert len(collections["issue_links_collection"].calls) == 3
     assert len(collections["transitions_collection"].calls) == 2
     assert len(collections["notification_preferences_collection"].calls) == 1

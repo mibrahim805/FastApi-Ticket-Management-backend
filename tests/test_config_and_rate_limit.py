@@ -35,6 +35,8 @@ def _request(
 def test_settings_load_required_values_from_env_file(tmp_path, monkeypatch):
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.delenv("MONGO_URI", raising=False)
+    monkeypatch.delenv("MONGO_DB_NAME", raising=False)
+    monkeypatch.delenv("ACCESS_TOKEN_EXPIRE_MINUTES", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "SECRET_KEY=abcdefghijklmnopqrstuvwxyz-1234567890\n"

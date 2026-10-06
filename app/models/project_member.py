@@ -12,3 +12,11 @@ class ProjectRole(str, Enum):
 class ProjectMemberCreate(BaseModel):
     user_id: str
     role: ProjectRole = ProjectRole.MEMBER
+
+
+class ProjectMemberRoleUpdate(BaseModel):
+    role: ProjectRole
+
+
+class ProjectMemberSuspension(BaseModel):
+    suspended: bool

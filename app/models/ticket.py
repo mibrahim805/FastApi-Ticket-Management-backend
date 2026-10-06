@@ -51,12 +51,17 @@ class Ticket(BaseModel):
     project_key: str
     ticket_id: str
     ticket_code: str
-    title: str
-    description: str
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(max_length=10000)
     category: Category
     issue_type: IssueType = IssueType.TASK
     epic_id: Optional[str] = None
+    parent_id: Optional[str] = Field(
+        default=None,
+        description="ID of the parent issue for a subtask",
+    )
     labels: List[str] = Field(default_factory=list)
+    components: List[str] = Field(default_factory=list)
     watchers: List[str] = Field(default_factory=list)
     sprint_id: Optional[str] = None
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
@@ -77,15 +82,20 @@ class TicketCreate(BaseModel):
     project_id: str = Field(
         description="Project ID that will own the ticket",
     )
-    title: str
-    description: str
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(max_length=10000)
     category: Category
     issue_type: IssueType = IssueType.TASK
     epic_id: Optional[str] = Field(
         default=None,
         description="ID of the epic that contains this issue",
     )
+    parent_id: Optional[str] = Field(
+        default=None,
+        description="ID of the parent issue for a subtask",
+    )
     labels: List[str] = Field(default_factory=list)
+    components: List[str] = Field(default_factory=list)
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     priority: Priority
     # created_at: datetime = datetime.now()
@@ -95,11 +105,13 @@ class TicketCreate(BaseModel):
 class TicketUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title: Optional[str] = None
-    description: Optional[str] = None
-    priority: Optional[str] = None
-    category: Optional[str] = None
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, max_length=10000)
+    priority: Optional[Priority] = None
+    category: Optional[Category] = None
     labels: Optional[List[str]] = None
+    components: Optional[List[str]] = None
+    parent_id: Optional[str] = None
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     due_date: Optional[datetime] = None
 

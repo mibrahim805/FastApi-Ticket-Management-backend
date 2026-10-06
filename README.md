@@ -16,14 +16,16 @@ A production-style Ticket Management System built with **FastAPI** and **MongoDB
 
 ---
 
-## User Roles
+## Authorization Roles
 
-- Super Admin
-- Admin
-- Agent
-- User
+There are only two global roles:
 
-Role-based authorization is implemented to restrict access to sensitive operations.
+- `super_admin` manages system-wide configuration and administrators.
+- `admin` manages user activation and system-wide reports.
+
+Ordinary accounts have no global role. Their access is determined by their
+per-project `lead`, `member`, or `reporter` membership and that project's
+permission scheme. Ticket assignees are not a separate global “agent” role.
 
 ---
 
@@ -35,6 +37,7 @@ Role-based authorization is implemented to restrict access to sensitive operatio
 - Get Project
 - List Projects
 - Manage Project Members
+- Configure Per-Project Role Permissions
 - Configure Project Workflows
 
 Each project contains:
@@ -84,6 +87,38 @@ Closed
 
 Each project can have its own workflow. A super admin or the project's lead can
 configure the project, its members, and its assigned statuses.
+
+---
+
+## Project Permission Schemes
+
+Every project starts with the standard `lead`, `member`, and `reporter`
+capabilities. A project lead or super admin can then grant or revoke capabilities
+for one role in that project without changing the same role in other projects.
+
+For example, this allows reporters to upload attachments in one project only:
+
+```http
+PUT /projects/{project_id}/permissions
+Content-Type: application/json
+
+{
+  "role": "reporter",
+  "grants": ["upload_attachments"],
+  "revocations": []
+}
+```
+
+`GET /projects/{project_id}/permissions` returns each role's defaults, overrides,
+and effective capabilities. `manage_project` cannot be overridden, preventing a
+scheme from granting project administration to another role or locking project
+leads out of configuration.
+
+The legacy `Permission` enum and runtime `Capability` enum are intentionally
+separate. `Permission` describes configurable role grants exposed by the
+project-permissions API, while `Capability` is the endpoint authorization
+vocabulary and also covers contextual actions such as ticket transitions and
+attachment exceptions.
 
 ---
 
@@ -176,6 +211,19 @@ Password Hashing
 ODM
 
 - PyMongo
+
+## Docker
+
+Docker Compose starts the API and MongoDB together:
+
+```bash
+docker compose up --build
+```
+
+The API is available at `http://localhost:7000`, with OpenAPI documentation at
+`http://localhost:7000/docs`. Set `SECRET_KEY` in the environment before
+starting Compose for anything beyond local development. MongoDB data and local
+attachments use named Docker volumes and survive container restarts.
 
 ---
 
@@ -545,6 +593,12 @@ Install dependencies
 pip install -r requirements.txt
 ```
 
+Install the Git hooks once for this clone:
+
+```bash
+pre-commit install
+```
+
 ---
 
 # 🔑 Environment Variables
@@ -602,19 +656,19 @@ uvicorn app.main:app --reload
 API
 
 ```
-http://127.0.0.1:8000
+http://127.0.0.1:7000
 ```
 
 Swagger UI
 
 ```
-http://127.0.0.1:8000/docs
+http://127.0.0.1:7000/docs
 ```
 
 ReDoc
 
 ```
-http://127.0.0.1:8000/redoc
+http://127.0.0.1:7000/redoc
 ```
 
 ---

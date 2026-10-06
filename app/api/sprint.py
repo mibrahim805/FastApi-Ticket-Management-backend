@@ -8,8 +8,7 @@ from pymongo.errors import DuplicateKeyError
 from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.permissions import (
-    PROJECT_LEAD_ROLES,
-    PROJECT_WORK_ROLES,
+    Capability,
     parse_object_id,
     require_project_membership,
 )
@@ -88,6 +87,8 @@ def _require_project_access(project_id: ObjectId, current_user: dict) -> dict:
         project_id,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_PROJECT,
+        role_detail="You do not have permission to view this project",
         allow_super_admin=True,
     )
 
@@ -97,7 +98,7 @@ def _require_project_work(project_id: ObjectId, current_user: dict) -> dict:
         project_id,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.MANAGE_TICKET_WORK,
         role_detail="Only project leads or members can manage sprint tickets",
         allow_super_admin=True,
     )
@@ -108,7 +109,7 @@ def _require_project_lead(project_id: ObjectId, current_user: dict) -> dict:
         project_id,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_LEAD_ROLES,
+        capability=Capability.MANAGE_SPRINTS,
         role_detail="Only project leads can manage sprints",
         allow_super_admin=True,
     )

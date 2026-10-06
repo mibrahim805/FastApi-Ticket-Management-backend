@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from pymongo import ASCENDING, MongoClient
+from pymongo.errors import OperationFailure
 
 from app.config import get_settings
 
@@ -22,10 +23,13 @@ reset_tokens_collection = db["reset_tokens"]
 statuses_collection = db["statuses"]
 attachment_collection = db["attachments"]
 ticket_activity_collection = db["ticket_activity"]
+project_activity_collection = db["project_activity"]
 counters_collection = db["counters"]
 project_members_collection = db["project_members"]
+project_permission_overrides_collection = db["project_permission_overrides"]
 issue_links_collection = db["issue_links"]
 transitions_collection = db["transitions"]
+project_components_collection = db["project_components"]
 sprints_collection = db["sprints"]
 
 
@@ -37,16 +41,76 @@ ISSUE_LINK_TO_TICKET_INDEX = "issue_links_to_ticket"
 TRANSITION_PROJECT_NAME_INDEX = "transitions_project_name"
 TRANSITION_PROJECT_SOURCE_INDEX = "transitions_project_source"
 NOTIFICATION_PREFERENCE_UNIQUE_INDEX = "notification_preferences_user_project_unique"
+NOTIFICATION_STREAM_INDEX = "notifications_user_created_at"
 SAVED_FILTER_USER_NAME_INDEX = "saved_filters_user_name_unique"
 RATE_LIMIT_EXPIRY_INDEX = "rate_limits_expiry_ttl"
+RESET_TOKEN_EXPIRY_INDEX = "reset_tokens_expiry_ttl"
 SPRINT_PROJECT_NAME_INDEX = "sprints_project_name_unique"
 SPRINT_ACTIVE_PROJECT_INDEX = "sprints_one_active_per_project"
 TICKET_SPRINT_BOARD_INDEX = "tickets_sprint_status_position"
 TICKET_BACKLOG_ORDER_INDEX = "tickets_project_backlog_position"
+SUPER_ADMIN_UNIQUE_INDEX = "users_one_super_admin"
+USER_EMAIL_UNIQUE_INDEX = "users_email_key_unique"
+MEMBERSHIP_UNIQUE_INDEX = "project_members_project_user_unique"
+COMPONENT_PROJECT_NAME_INDEX = "project_components_project_name_unique"
+STATUS_NAME_INDEX = "statuses_name_key_unique"
+STATUS_ORDER_INDEX = "statuses_order_unique"
+LEGACY_INERT_GLOBAL_ROLES = frozenset({"user", "customer", "agent"})
+
+
+def _ensure_index(collection, keys, **options):
+    """Create an index, reconciling an older definition with the same name."""
+    try:
+        return collection.create_index(keys, **options)
+    except OperationFailure as error:
+        if error.code != 86 or not hasattr(collection, "drop_index"):
+            raise
+        collection.drop_index(options["name"])
+        try:
+            return collection.create_index(keys, **options)
+        except OperationFailure as recreate_error:
+            # Another application instance may have reconciled the index
+            # concurrently. If it is the same named conflict, its unique
+            # constraint is already present and startup can continue.
+            if recreate_error.code == 86:
+                return options["name"]
+            raise
 
 
 def ensure_database_indexes() -> None:
     """Create the indexes required for application-level invariants."""
+    _ensure_index(
+        user_collection,
+        [("email_key", ASCENDING)],
+        name=USER_EMAIL_UNIQUE_INDEX,
+        unique=True,
+        partialFilterExpression={"email_key": {"$type": "string"}},
+    )
+    for collection, keys, name in [
+        (
+            project_members_collection,
+            [("project_id", ASCENDING), ("user_id", ASCENDING)],
+            MEMBERSHIP_UNIQUE_INDEX,
+        ),
+        (
+            project_components_collection,
+            [("project_id", ASCENDING), ("name_key", ASCENDING)],
+            COMPONENT_PROJECT_NAME_INDEX,
+        ),
+        (statuses_collection, [("name_key", ASCENDING)], STATUS_NAME_INDEX),
+        (statuses_collection, [("order", ASCENDING)], STATUS_ORDER_INDEX),
+    ]:
+        if hasattr(collection, "create_index"):
+            options = {"name": name, "unique": True}
+            if collection is statuses_collection and keys[-1][0] == "name_key":
+                options["partialFilterExpression"] = {"name_key": {"$type": "string"}}
+            _ensure_index(collection, keys, **options)
+    user_collection.create_index(
+        [("role", ASCENDING)],
+        name=SUPER_ADMIN_UNIQUE_INDEX,
+        unique=True,
+        partialFilterExpression={"role": "super_admin"},
+    )
     projects_collection.create_index(
         [("code", ASCENDING)],
         name=PROJECT_CODE_UNIQUE_INDEX,
@@ -70,9 +134,11 @@ def ensure_database_indexes() -> None:
         [("to_ticket_id", ASCENDING)],
         name=ISSUE_LINK_TO_TICKET_INDEX,
     )
-    transitions_collection.create_index(
-        [("project_id", ASCENDING), ("name", ASCENDING)],
+    _ensure_index(
+        transitions_collection,
+        [("project_id", ASCENDING), ("name_key", ASCENDING)],
         name=TRANSITION_PROJECT_NAME_INDEX,
+        unique=True,
     )
     transitions_collection.create_index(
         [("project_id", ASCENDING), ("from_status_ids", ASCENDING)],
@@ -83,6 +149,10 @@ def ensure_database_indexes() -> None:
         name=NOTIFICATION_PREFERENCE_UNIQUE_INDEX,
         unique=True,
     )
+    notifications_collection.create_index(
+        [("user_id", ASCENDING), ("created_at", ASCENDING)],
+        name=NOTIFICATION_STREAM_INDEX,
+    )
     saved_filters_collection.create_index(
         [("user_id", ASCENDING), ("name_key", ASCENDING)],
         name=SAVED_FILTER_USER_NAME_INDEX,
@@ -91,6 +161,11 @@ def ensure_database_indexes() -> None:
     rate_limits_collection.create_index(
         [("expires_at", ASCENDING)],
         name=RATE_LIMIT_EXPIRY_INDEX,
+        expireAfterSeconds=0,
+    )
+    reset_tokens_collection.create_index(
+        [("expires_at", ASCENDING)],
+        name=RESET_TOKEN_EXPIRY_INDEX,
         expireAfterSeconds=0,
     )
     sprints_collection.create_index(
@@ -121,6 +196,48 @@ def ensure_database_indexes() -> None:
         ],
         name=TICKET_BACKLOG_ORDER_INDEX,
     )
+
+
+def migrate_legacy_global_roles() -> int:
+    """Remove historical role labels that never granted any authorization."""
+    migrated_count = 0
+    legacy_users = user_collection.find(
+        {"role": {"$in": list(LEGACY_INERT_GLOBAL_ROLES)}}
+    )
+    for user in legacy_users:
+        user_collection.update_one(
+            {"_id": user["_id"]},
+            {"$unset": {"role": ""}},
+        )
+        migrated_count += 1
+    return migrated_count
+
+
+def migrate_status_metadata() -> int:
+    """Backfill stable status keys and reporting categories."""
+    migrated_count = 0
+    for status in statuses_collection.find({}):
+        key = str(status.get("key") or status.get("name", "")).strip().lower()
+        key = key.replace("-", "_").replace(" ", "_")
+        category = status.get("category")
+        if not category:
+            if key in {"closed", "resolved"}:
+                category = key
+            elif key in {"open", "to_do", "reopened"}:
+                category = "open"
+            elif key == "on_hold":
+                category = "on_hold"
+            else:
+                category = "in_progress"
+        updates = {}
+        if status.get("key") != key:
+            updates["key"] = key
+        if status.get("category") != category:
+            updates["category"] = category
+        if updates:
+            statuses_collection.update_one({"_id": status["_id"]}, {"$set": updates})
+            migrated_count += 1
+    return migrated_count
 
 
 def migrate_legacy_workflow_transitions() -> int:
