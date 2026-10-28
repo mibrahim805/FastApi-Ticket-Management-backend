@@ -1,4 +1,5 @@
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,6 +12,18 @@ PROJECT_KEY_DESCRIPTION = (
 )
 
 
+def _validate_repository_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return value
+    value = value.strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Repository URL must be a valid HTTP or HTTPS URL")
+    return value
+
+
 class Project(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -21,6 +34,7 @@ class Project(BaseModel):
         pattern=PROJECT_KEY_PATTERN,
         description=PROJECT_KEY_DESCRIPTION,
     )
+    repository_url: Optional[str] = Field(default=None, max_length=2048)
     created_by: str
     total_tickets: int = 0
     assigned_statuses: List[str] = Field(default_factory=list)
@@ -35,6 +49,7 @@ class ProjectCreate(BaseModel):
         pattern=PROJECT_KEY_PATTERN,
         description=PROJECT_KEY_DESCRIPTION,
     )
+    repository_url: Optional[str] = Field(default=None, max_length=2048)
 
     @field_validator("name")
     @classmethod
@@ -43,6 +58,11 @@ class ProjectCreate(BaseModel):
         if not value:
             raise ValueError("Project name cannot be blank")
         return value
+
+    @field_validator("repository_url")
+    @classmethod
+    def validate_repository_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_repository_url(value)
 
 
 class ProjectUpdate(BaseModel):
@@ -54,6 +74,7 @@ class ProjectUpdate(BaseModel):
         pattern=PROJECT_KEY_PATTERN,
         description=PROJECT_KEY_DESCRIPTION,
     )
+    repository_url: Optional[str] = Field(default=None, max_length=2048)
 
     @field_validator("name")
     @classmethod
@@ -64,6 +85,11 @@ class ProjectUpdate(BaseModel):
         if not value:
             raise ValueError("Project name cannot be blank")
         return value
+
+    @field_validator("repository_url")
+    @classmethod
+    def validate_repository_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_repository_url(value)
 
 
 class ProjectMember(BaseModel):

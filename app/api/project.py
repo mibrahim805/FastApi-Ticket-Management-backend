@@ -743,7 +743,8 @@ def update_project(
     project_object_id, project = _get_project_or_404(project_id)
     _require_project_admin(project_object_id, current_user)
 
-    update_data = data.model_dump(exclude_none=True)
+    # Keep explicitly supplied null values so the repository link can be cleared.
+    update_data = data.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No project fields supplied")
 
