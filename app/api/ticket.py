@@ -1587,6 +1587,24 @@ def get_tickets_summary(
             "$group": {
                 "_id": None,
                 "total_tickets": {"$sum": 1},
+                "open_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "open"]}, 1, 0]}
+                },
+                "in_progress_tickets": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$status.category", "in_progress"]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+                "on_hold_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "on_hold"]}, 1, 0]}
+                },
+                "resolved_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "resolved"]}, 1, 0]}
+                },
                 "to_do_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$status.key", "to_do"]}, 1, 0]}
                 },
@@ -1625,6 +1643,44 @@ def get_tickets_summary(
                 },
                 "urgent_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "urgent"]}, 1, 0]}
+                },
+                "bug_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "bug"]}, 1, 0]}
+                },
+                "task_tickets": {
+                    "$sum": {
+                        "$cond": [{"$in": ["$issue_type", ["task", "subtask"]]}, 1, 0]
+                    }
+                },
+                "story_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "story"]}, 1, 0]}
+                },
+                "epic_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "epic"]}, 1, 0]}
+                },
+                "overdue_tickets": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    {"$ne": ["$due_date", None]},
+                                    {"$lt": ["$due_date", datetime.now(timezone.utc)]},
+                                    {
+                                        "$not": [
+                                            {
+                                                "$in": [
+                                                    "$status.category",
+                                                    ["resolved", "closed"],
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                ]
+                            },
+                            1,
+                            0,
+                        ]
+                    }
                 },
             }
         },
