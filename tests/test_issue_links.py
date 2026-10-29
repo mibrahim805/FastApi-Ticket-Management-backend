@@ -245,7 +245,7 @@ def test_get_ticket_links_returns_incoming_and_outgoing_links(
     assert all(isinstance(link["_id"], str) for link in response["links"])
 
 
-def test_delete_ticket_removes_associated_issue_links(
+def test_delete_ticket_archives_ticket_and_preserves_associated_issue_links(
     monkeypatch,
     fake_collection,
     issue_links,
@@ -297,9 +297,10 @@ def test_delete_ticket_removes_associated_issue_links(
         current_user={"_id": user_id, "role": "agent"},
     )
 
-    assert len(issue_links.documents) == 1
-    assert issue_links.documents[0]["from_ticket_id"] == str(other_ticket_id)
-    assert issue_links.documents[0]["to_ticket_id"] == str(third_ticket_id)
+    assert len(issue_links.documents) == 3
+    archived_ticket = ticket.ticket_collection.documents[0]
+    assert archived_ticket["deleted_by"] == str(user_id)
+    assert archived_ticket["deletion_reason"] == "deleted_by_user"
     assert ticket_activities.documents[-1]["action"] == "ticket_deleted"
 
 

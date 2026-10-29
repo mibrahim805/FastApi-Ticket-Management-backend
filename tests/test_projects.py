@@ -39,11 +39,13 @@ def test_project_update_key_rejects_invalid_values(code):
 
 def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch):
     project_calls = []
+    user_calls = []
     issue_link_calls = []
     transition_calls = []
     notification_preference_calls = []
     saved_filter_calls = []
     rate_limit_calls = []
+    reset_token_calls = []
     sprint_calls = []
     ticket_calls = []
 
@@ -58,6 +60,11 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
         database,
         "projects_collection",
         RecordingCollection(project_calls),
+    )
+    monkeypatch.setattr(
+        database,
+        "user_collection",
+        RecordingCollection(user_calls),
     )
     monkeypatch.setattr(
         database,
@@ -86,6 +93,11 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     )
     monkeypatch.setattr(
         database,
+        "reset_tokens_collection",
+        RecordingCollection(reset_token_calls),
+    )
+    monkeypatch.setattr(
+        database,
         "sprints_collection",
         RecordingCollection(sprint_calls),
     )
@@ -96,6 +108,31 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     )
 
     database.ensure_database_indexes()
+
+    assert user_calls == [
+        (
+            [("email_key", 1)],
+            {
+                "name": "users_email_key_unique",
+                "unique": True,
+                "partialFilterExpression": {"email_key": {"$type": "string"}},
+            },
+        ),
+        (
+            [("role", 1)],
+            {
+                "name": "users_one_super_admin",
+                "unique": True,
+                "partialFilterExpression": {"role": "super_admin"},
+            },
+        ),
+    ]
+    assert reset_token_calls == [
+        (
+            [("expires_at", 1)],
+            {"name": "reset_tokens_expiry_ttl", "expireAfterSeconds": 0},
+        )
+    ]
 
     assert project_calls == [
         (
@@ -130,8 +167,8 @@ def test_database_creates_case_insensitive_unique_project_key_index(monkeypatch)
     ]
     assert transition_calls == [
         (
-            [("project_id", 1), ("name", 1)],
-            {"name": "transitions_project_name"},
+            [("project_id", 1), ("name_key", 1)],
+            {"name": "transitions_project_name", "unique": True},
         ),
         (
             [("project_id", 1), ("from_status_ids", 1)],
@@ -212,6 +249,11 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
     )
     monkeypatch.setattr(
         app_main,
+        "migrate_legacy_global_roles",
+        lambda: calls.append("roles_migrated"),
+    )
+    monkeypatch.setattr(
+        app_main,
         "migrate_legacy_workflow_transitions",
         lambda: calls.append("migrated"),
     )
@@ -222,7 +264,27 @@ def test_application_startup_ensures_database_indexes(monkeypatch):
 
     asyncio.run(run_lifespan())
 
-    assert calls == ["created", "migrated"]
+    assert calls == ["created", "roles_migrated", "migrated"]
+
+
+def test_legacy_inert_global_roles_are_removed(monkeypatch, fake_collection):
+    ordinary_ids = [ObjectId(), ObjectId(), ObjectId()]
+    admin_id = ObjectId()
+    users = fake_collection.__class__(
+        [
+            {"_id": ordinary_ids[0], "role": "user"},
+            {"_id": ordinary_ids[1], "role": "customer"},
+            {"_id": ordinary_ids[2], "role": "agent"},
+            {"_id": admin_id, "role": "admin"},
+        ]
+    )
+    monkeypatch.setattr(database, "user_collection", users)
+
+    assert database.migrate_legacy_global_roles() == 3
+    assert all(
+        "role" not in users.find_one({"_id": user_id}) for user_id in ordinary_ids
+    )
+    assert users.find_one({"_id": admin_id})["role"] == "admin"
 
 
 def test_legacy_embedded_workflow_is_migrated(
@@ -418,7 +480,11 @@ def test_update_project_handles_unique_index_race(
 
 
 def test_project_lead_and_super_admin_can_add_members(
-    monkeypatch, fake_collection, project_members, grant_project_role
+    monkeypatch,
+    fake_collection,
+    project_members,
+    project_activities,
+    grant_project_role,
 ):
     project_id = ObjectId()
     lead_id = ObjectId()
@@ -451,6 +517,10 @@ def test_project_lead_and_super_admin_can_add_members(
     }
     assert roles_by_user[member_id] == "member"
     assert roles_by_user[admin_added_id] == "reporter"
+    assert [activity["action"] for activity in project_activities.documents] == [
+        "project_member_added",
+        "project_member_added",
+    ]
 
 
 def test_project_response_hides_retired_fields(

@@ -3,7 +3,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.api import project, status
-from app.models.project import ProjectStatusAssign
+from app.models.project import ProjectStatusAssign, StatusMigration
 from app.models.status import StatusCreate, StatusUpdate
 
 
@@ -47,6 +47,99 @@ def test_assign_statuses_to_project_orders_statuses(
     assert projects.documents[0]["assigned_statuses"] == [str(first_id), str(second_id)]
     assert projects.documents[0]["default_status_id"] == str(first_id)
     assert transitions.documents == []
+
+
+def test_assign_statuses_requires_and_applies_ticket_status_migration(
+    monkeypatch, fake_collection, grant_project_role
+):
+    project_id = ObjectId()
+    lead_id = ObjectId()
+    removed_id = ObjectId()
+    target_id = ObjectId()
+    keep_id = ObjectId()
+    projects = fake_collection.__class__(
+        [
+            {
+                "_id": project_id,
+                "assigned_statuses": [
+                    str(removed_id),
+                    str(target_id),
+                    str(keep_id),
+                ],
+            }
+        ]
+    )
+    statuses = fake_collection.__class__(
+        [
+            {"_id": removed_id, "name": "Old", "order": 1},
+            {"_id": target_id, "name": "New", "order": 2},
+            {"_id": keep_id, "name": "Keep", "order": 3},
+        ]
+    )
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "project_id": str(project_id),
+                "current_status_id": str(removed_id),
+                "current_status_name": "Old",
+            }
+        ]
+    )
+    monkeypatch.setattr(project, "projects_collection", projects)
+    monkeypatch.setattr(project, "statuses_collection", statuses)
+    monkeypatch.setattr(project, "ticket_collection", tickets)
+    grant_project_role(project_id, lead_id)
+
+    with pytest.raises(HTTPException) as exc_info:
+        project.assign_statuses_to_project(
+            str(project_id),
+            ProjectStatusAssign(status_ids=[str(target_id), str(keep_id)]),
+            current_user={"_id": lead_id, "role": "super_admin"},
+        )
+    assert exc_info.value.status_code == 400
+
+    project.assign_statuses_to_project(
+        str(project_id),
+        ProjectStatusAssign(
+            status_ids=[str(target_id), str(keep_id)],
+            status_migrations=[
+                StatusMigration(
+                    remove_status_id=str(removed_id),
+                    move_existing_tickets_to=str(target_id),
+                )
+            ],
+        ),
+        current_user={"_id": lead_id, "role": "super_admin"},
+    )
+    assert tickets.documents[0]["current_status_id"] == str(target_id)
+    assert tickets.documents[0]["current_status_name"] == "New"
+
+
+def test_renaming_status_updates_denormalized_ticket_names(
+    monkeypatch, fake_collection
+):
+    status_id = ObjectId()
+    statuses = fake_collection.__class__([{"_id": status_id, "name": "Old"}])
+    tickets = fake_collection.__class__(
+        [
+            {
+                "_id": ObjectId(),
+                "current_status_id": str(status_id),
+                "current_status_name": "Old",
+            }
+        ]
+    )
+    monkeypatch.setattr(status, "statuses_collection", statuses)
+    monkeypatch.setattr(status, "ticket_collection", tickets)
+
+    status.update_status(
+        str(status_id),
+        StatusUpdate(name="Renamed"),
+        current_user={"role": "super_admin"},
+    )
+
+    assert tickets.documents[0]["current_status_name"] == "Renamed"
 
 
 def test_assign_statuses_to_project_rejects_non_admin(

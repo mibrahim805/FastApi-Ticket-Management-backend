@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package ticket_management.notifications;
+
+service NotificationService {
+  rpc SubscribeNotifications(SubscribeRequest) returns (stream Notification);
+}
+
+message SubscribeRequest {
+  // The last event received by the client. The server sends only later events.
+  string last_event_id = 1;
+}
+
+message Notification {
+  string id = 1;
+  string project_id = 2;
+  string comment_id = 3;
+  string ticket_id = 4;
+  string user_id = 5;
+  string actor_id = 6;
+  string event_type = 7;
+  string created_at = 8;
+  bool is_read = 9;
+  string read_at = 10;
+}

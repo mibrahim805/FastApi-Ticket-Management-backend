@@ -33,6 +33,14 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
             if document.get(key) not in expected["$in"]:
                 return False
             continue
+        if isinstance(expected, dict) and "$exists" in expected:
+            if (key in document) is not expected["$exists"]:
+                return False
+            continue
+        if isinstance(expected, dict) and "$gt" in expected:
+            if document.get(key) is None or document[key] <= expected["$gt"]:
+                return False
+            continue
         if isinstance(expected, dict) and "$all" in expected:
             value = document.get(key)
             if not isinstance(value, list) or not all(
@@ -85,6 +93,7 @@ class FakeCollection:
         self.inserted_documents: list[dict[str, Any]] = []
         self.updated_documents: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.deleted_queries: list[dict[str, Any]] = []
+        self.indexes: list[tuple[Any, dict[str, Any]]] = []
 
     def find_one(self, query, projection=None):
         if isinstance(query, ObjectId):
@@ -141,6 +150,19 @@ class FakeCollection:
                 self.updated_documents.append((query, update))
                 return
 
+    def update_many(self, query, update):
+        matched_count = 0
+        for document in self.documents:
+            if not _matches(document, query):
+                continue
+            matched_count += 1
+            if "$set" in update:
+                document.update(update["$set"])
+            if "$unset" in update:
+                for key in update["$unset"]:
+                    document.pop(key, None)
+        return type("UpdateResult", (), {"matched_count": matched_count})()
+
     def delete_one(self, query):
         if isinstance(query, ObjectId):
             query = {"_id": query}
@@ -156,6 +178,13 @@ class FakeCollection:
 
     def aggregate(self, pipeline):
         return []
+
+    def create_index(self, keys, **options):
+        self.indexes.append((keys, options))
+        return options.get("name")
+
+    def drop_index(self, name):
+        self.indexes = [item for item in self.indexes if item[1].get("name") != name]
 
     def find(self, query=None):
         query = query or {}
@@ -221,6 +250,11 @@ def ticket_activities(fake_collection):
 
 
 @pytest.fixture
+def project_activities(fake_collection):
+    return fake_collection.__class__()
+
+
+@pytest.fixture
 def notification_preferences(fake_collection):
     return fake_collection.__class__()
 
@@ -272,6 +306,31 @@ def isolate_project_members_collection(monkeypatch, project_members):
             monkeypatch.setattr(module, "project_members_collection", project_members)
 
     return project_members
+
+
+@pytest.fixture(autouse=True)
+def isolate_all_database_collections(monkeypatch):
+    """Ensure an endpoint or startup helper cannot reach the real Mongo client."""
+    import app.db.db as database
+
+    #     if module is None:
+    #         continue
+    #     for name, replacement in replacements.items():
+    #         if getattr(module, name, None) is original_collections[name]:
+    #             monkeypatch.setattr(module, name, replacement, raising=False)
+    # return replacements
+
+    collection_names = (name for name in vars(database) if name.endswith("_collection"))
+    collection_names = [name for name in vars(database) if name.endswith("_collection")]
+    original_collections = {name: getattr(database, name) for name in collection_names}
+    replacements = {name: FakeCollection() for name in collection_names}
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        for name, replacement in replacements.items():
+            if getattr(module, name, None) is original_collections[name]:
+                monkeypatch.setattr(module, name, replacement, raising=False)
+    return replacements
 
 
 @pytest.fixture(autouse=True)
@@ -372,33 +431,18 @@ def isolate_ticket_activity_collection(monkeypatch, ticket_activities):
     return ticket_activities
 
 
-def test_matches_returns_false_when_no_or_clause_matches():
-    document = {
-        "role": "agent",
-        "name": "Ibrahim",
-    }
+@pytest.fixture(autouse=True)
+def isolate_project_activity_collection(monkeypatch, project_activities):
+    for module_name in (
+        "app.db.db",
+        "app.api.activity",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "project_activity_collection"):
+            monkeypatch.setattr(
+                module,
+                "project_activity_collection",
+                project_activities,
+            )
 
-    query = {
-        "$or": [
-            {"role": "admin"},
-            {"name": "Ali"},
-        ]
-    }
-
-    assert _matches(document, query) is False
-
-
-def test_matches_returns_true_when_one_or_clause_matches():
-    document = {
-        "role": "agent",
-        "name": "Ibrahim",
-    }
-
-    query = {
-        "$or": [
-            {"role": "admin"},
-            {"role": "agent"},
-        ]
-    }
-
-    assert _matches(document, query) is True
+    return project_activities

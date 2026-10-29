@@ -1,14 +1,15 @@
 from datetime import datetime, timezone
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from app.api.permissions import (
     SUPER_ADMIN_ROLES,
     ensure_role,
+    parse_object_id,
     require_role,
 )
-from app.db.db import projects_collection, statuses_collection
+from app.db.db import projects_collection, statuses_collection, ticket_collection
 from app.models.status import StatusCreate, StatusUpdate
 
 router = APIRouter(prefix="/statuses", tags=["Statuses"])
@@ -35,6 +36,16 @@ DEFAULT_WORKFLOW_STATUSES = [
 
 def _normalize_status_name(name: str) -> str:
     return name.strip().lower().replace(" ", "_")
+
+
+def _status_category(key: str) -> str:
+    if key in {"closed", "resolved"}:
+        return key
+    if key in {"open", "to_do", "reopened"}:
+        return "open"
+    if key == "on_hold":
+        return "on_hold"
+    return "in_progress"
 
 
 def _serialize_status(status: dict) -> dict:
@@ -66,10 +77,19 @@ def create_status(
 
     status = {
         "name": payload.name,
+        "name_key": _normalize_status_name(payload.name),
         "order": payload.order,
+        "key": payload.key or _normalize_status_name(payload.name),
+        "category": payload.category
+        or _status_category(payload.key or _normalize_status_name(payload.name)),
         "created_at": datetime.now(timezone.utc),
     }
-    result = statuses_collection.insert_one(status)
+    try:
+        result = statuses_collection.insert_one(status)
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409, detail="Status name or order already exists"
+        )
     status["_id"] = str(result.inserted_id)
     return status
 
@@ -111,6 +131,8 @@ def create_default_workflow_statuses(
         status = {
             "name": default_status["name"],
             "order": order,
+            "key": name_key,
+            "category": _status_category(name_key),
             "created_at": now,
         }
         result = statuses_collection.insert_one(status)
@@ -154,7 +176,8 @@ def update_status(
         detail="Only super_admin can manage statuses",
     )
 
-    status = statuses_collection.find_one({"_id": ObjectId(status_id)})
+    status_object_id = parse_object_id(status_id, "status_id")
+    status = statuses_collection.find_one({"_id": status_object_id})
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
@@ -162,7 +185,30 @@ def update_status(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields provided to update")
 
-    statuses_collection.update_one({"_id": ObjectId(status_id)}, {"$set": update_data})
+    if "name" in update_data:
+        update_data["name_key"] = _normalize_status_name(update_data["name"])
+        duplicate = statuses_collection.find_one(
+            {"name_key": update_data["name_key"], "_id": {"$ne": status_object_id}}
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Status name already exists")
+    if "order" in update_data:
+        duplicate = statuses_collection.find_one(
+            {"order": update_data["order"], "_id": {"$ne": status_object_id}}
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Status order already exists")
+    try:
+        statuses_collection.update_one({"_id": status_object_id}, {"$set": update_data})
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409, detail="Status name or order already exists"
+        )
+    if "name" in update_data:
+        ticket_collection.update_many(
+            {"current_status_id": status_id},
+            {"$set": {"current_status_name": update_data["name"]}},
+        )
     return {"message": "Status updated successfully"}
 
 
@@ -177,7 +223,8 @@ def delete_status(
         detail="Only super_admin can manage statuses",
     )
 
-    status = statuses_collection.find_one({"_id": ObjectId(status_id)})
+    status_object_id = parse_object_id(status_id, "status_id")
+    status = statuses_collection.find_one({"_id": status_object_id})
     if not status:
         raise HTTPException(status_code=404, detail="Status not found")
 
@@ -188,5 +235,5 @@ def delete_status(
             detail="Cannot delete — this status is assigned to one or more projects",
         )
 
-    statuses_collection.delete_one({"_id": ObjectId(status_id)})
+    statuses_collection.delete_one({"_id": status_object_id})
     return {"message": "Status deleted successfully"}

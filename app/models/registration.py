@@ -1,28 +1,38 @@
 import enum
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
-class Role(str, enum.Enum):
+class GlobalRole(str, enum.Enum):
     SUPER_ADMIN = "super_admin"
-    USER = "user"
     ADMIN = "admin"
-    CUSTOMER = "customer"
-    AGENT = "agent"
 
 
 class UserRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12)
     is_active: bool = True
-    role: str = Role.USER.value
 
 
-class SuperAminRegister(BaseModel):
+class AdminRegister(UserRegister):
+    """Account payload for the one meaningful delegated global role."""
+
+
+class UserManagementCreate(UserRegister):
+    """Payload used by super admins to create a managed account."""
+
+    role: GlobalRole | None = None
+
+
+class SuperAdminRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12)
 
 
 class UserLogin(BaseModel):
@@ -30,16 +40,24 @@ class UserLogin(BaseModel):
     password: str
 
 
-class ChangeUserRole(BaseModel):
-    role: Role
+class ChangeGlobalRole(BaseModel):
+    role: GlobalRole | None
 
 
 class UserUpdate(BaseModel):
     name: str
-    password: str
-    is_active: bool
+    password: str = Field(min_length=12)
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    new_password: str
+    new_password: str = Field(min_length=12)
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=12)
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr

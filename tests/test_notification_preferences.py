@@ -182,3 +182,7 @@ def test_notification_preference_routes_are_exposed_in_openapi():
     paths = app.openapi()["paths"]
 
     assert set(paths["/notifications/preferences/{project_id}"]) == {"get", "put"}
+
+
+def test_notification_stream_route_is_exposed_in_openapi():
+    assert "get" in app.openapi()["paths"]["/notifications/stream"]

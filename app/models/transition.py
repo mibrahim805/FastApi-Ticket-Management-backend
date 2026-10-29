@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -37,3 +37,10 @@ class TransitionCreate(BaseModel):
 
 class ProjectWorkflowUpdate(BaseModel):
     transitions: List[TransitionCreate] = Field(default_factory=list)
+
+
+class TransitionPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    from_status_ids: Optional[List[str]] = None
+    to_status_id: Optional[str] = None
+    guard: Optional[TransitionGuard] = None

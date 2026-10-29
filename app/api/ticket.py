@@ -12,12 +12,16 @@ from app.api.activity import log_activity
 from app.api.auth import get_current_user
 from app.api.notification_delivery import create_notification
 from app.api.permissions import (
-    PROJECT_LEAD_ROLES,
-    PROJECT_WORK_ROLES,
+    Capability,
+    can_assign_ticket,
+    can_upload_attachment,
     get_accessible_project_ids,
     get_project_membership,
+    has_capability,
     require_project_membership,
     require_ticket_membership,
+    serialize_capabilities,
+    transition_guard_error,
 )
 from app.api.watcher_notifications import notify_ticket_watchers
 from app.db.db import (
@@ -26,6 +30,7 @@ from app.db.db import (
     issue_links_collection,
     notification_preferences_collection,
     notifications_collection,
+    project_components_collection,
     project_members_collection,
     projects_collection,
     sprints_collection,
@@ -34,7 +39,6 @@ from app.db.db import (
     transitions_collection,
     user_collection,
 )
-from app.models.project_member import ProjectRole
 from app.models.ticket import (
     AssignAgent,
     BulkAssignRequest,
@@ -52,6 +56,29 @@ DONE_STATUS_NAMES = frozenset({"done", "closed", "resolved"})
 
 def normalize_status_name(name: str) -> str:
     return re.sub(r"[\s-]+", "_", name.strip().lower())
+
+
+def _status_category_for_ticket(ticket: dict) -> str | None:
+    status_id = ticket.get("current_status_id")
+    if status_id:
+        try:
+            status = statuses_collection.find_one({"_id": ObjectId(str(status_id))})
+        except InvalidId:
+            status = None
+        if status and status.get("category"):
+            return status["category"]
+    # Compatibility for tickets created before status metadata was introduced.
+    legacy_key = normalize_status_name(str(ticket.get("current_status_name") or ""))
+    if legacy_key in {"resolved", "closed", "done"}:
+        return legacy_key
+    return "open" if legacy_key else None
+
+
+def _status_ids_for_categories(categories: set[str]) -> list[str]:
+    return [
+        str(status["_id"])
+        for status in statuses_collection.find({"category": {"$in": list(categories)}})
+    ]
 
 
 def _parse_object_id(value: str, field_name: str) -> ObjectId:
@@ -73,13 +100,39 @@ def _serialize_ticket(ticket: dict) -> dict:
         serialized["_id"] = str(serialized["_id"])
     serialized.setdefault("issue_type", IssueType.TASK.value)
     serialized.setdefault("epic_id", None)
+    serialized.setdefault("parent_id", None)
     serialized.setdefault("labels", [])
+    component_ids = serialized.get("component_ids", [])
+    serialized["component_ids"] = [str(value) for value in component_ids]
+    if "components" not in serialized:
+        serialized["components"] = [
+            item["name"]
+            for item in project_components_collection.find(
+                {"_id": {"$in": component_ids}}
+            )
+        ]
     serialized.setdefault("watchers", [])
     serialized.setdefault("sprint_id", None)
     serialized.setdefault("story_points", None)
     serialized.setdefault("backlog_position", None)
     serialized.setdefault("board_position", 0)
     return serialized
+
+
+def _validate_component_ids(project_id, values):
+    ids = [_parse_object_id(value, "component_id") for value in values]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="Component IDs must be unique")
+    found = list(
+        project_components_collection.find(
+            {"project_id": project_id, "_id": {"$in": ids}}
+        )
+    )
+    if len(found) != len(ids):
+        raise HTTPException(
+            status_code=400, detail="Component must belong to the project"
+        )
+    return ids
 
 
 def _serialize_issue_link(link: dict) -> dict:
@@ -101,7 +154,7 @@ def _serialize_transition(transition: dict) -> dict:
 def _get_ticket_or_404(ticket_id: str) -> tuple[ObjectId, dict]:
     ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket_object_id, ticket
 
@@ -109,7 +162,7 @@ def _get_ticket_or_404(ticket_id: str) -> tuple[ObjectId, dict]:
 def _get_epic_or_404(epic_id: str) -> tuple[ObjectId, dict]:
     epic_object_id = _parse_object_id(epic_id, "epic_id")
     epic = ticket_collection.find_one({"_id": epic_object_id})
-    if not epic:
+    if not epic or epic.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Epic not found")
     if epic.get("issue_type") != IssueType.EPIC.value:
         raise HTTPException(status_code=400, detail="Referenced issue is not an epic")
@@ -163,19 +216,7 @@ def _transition_guard_error(
     ticket: dict,
     membership: dict,
 ) -> tuple[int, str] | None:
-    guard = transition.get("guard", {})
-    allowed_roles = {
-        role.value if isinstance(role, ProjectRole) else role
-        for role in guard.get(
-            "allowed_roles",
-            [ProjectRole.LEAD.value, ProjectRole.MEMBER.value],
-        )
-    }
-    if membership.get("role") not in allowed_roles:
-        return 403, "Your project role cannot use this transition"
-    if guard.get("requires_assignee") and not ticket.get("assigned_agent"):
-        return 400, "Ticket must be assigned before using this transition"
-    return None
+    return transition_guard_error(transition, ticket, membership)
 
 
 def _apply_ticket_transition(
@@ -190,6 +231,7 @@ def _apply_ticket_transition(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.TRANSITION_TICKETS,
     )
     transition_project_id = transition.get("project_id")
     if transition_project_id is not None and str(transition_project_id) != str(
@@ -329,6 +371,7 @@ def _run_transition_by_id(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.TRANSITION_TICKETS,
     )
     _, project = _get_ticket_project(ticket)
     transition_object_id = _parse_object_id(transition_id, "transition_id")
@@ -403,13 +446,15 @@ def create_ticket(
     project = projects_collection.find_one(
         {"_id": _parse_object_id(payload.project_id, "project_id")}
     )
-    if not project:
+    if not project or project.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Project not found")
 
     require_project_membership(
         project["_id"],
         current_user,
         project_members_collection,
+        capability=Capability.CREATE_TICKET,
+        role_detail="You do not have permission to create tickets",
     )
 
     epic_id = None
@@ -426,6 +471,24 @@ def create_ticket(
                 detail="Epic must belong to the same project as the issue",
             )
         epic_id = str(epic_object_id)
+
+    parent_id = None
+    if payload.parent_id is not None:
+        if payload.issue_type != IssueType.SUBTASK:
+            raise HTTPException(
+                status_code=400,
+                detail="Only subtasks can have a parent issue",
+            )
+        parent_object_id = _parse_object_id(payload.parent_id, "parent_id")
+        parent = ticket_collection.find_one({"_id": parent_object_id})
+        if not parent or parent.get("deleted_at") is not None:
+            raise HTTPException(status_code=404, detail="Parent issue not found")
+        if str(parent.get("project_id")) != str(project["_id"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Parent issue must belong to the same project as the subtask",
+            )
+        parent_id = str(parent_object_id)
 
     assigned_statuses = project.get("assigned_statuses", [])
     if not assigned_statuses:
@@ -452,6 +515,7 @@ def create_ticket(
         )
     next_number = _next_project_ticket_number(project)
     ticket_code = f"{project_key}-{next_number}"
+    component_ids = _validate_component_ids(project["_id"], payload.components)
 
     ticket = {
         "project_id": str(project["_id"]),
@@ -463,7 +527,9 @@ def create_ticket(
         "category": payload.category.value,
         "issue_type": payload.issue_type.value,
         "epic_id": epic_id,
+        "parent_id": parent_id,
         "labels": list(payload.labels),
+        "component_ids": component_ids,
         "watchers": [],
         "sprint_id": None,
         "story_points": payload.story_points,
@@ -523,6 +589,7 @@ def get_epic(
         epic,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     project_object_id = _parse_object_id(epic.get("project_id"), "project_id")
@@ -535,6 +602,7 @@ def get_epic(
             {
                 "epic_id": str(epic_object_id),
                 "project_id": str(project_object_id),
+                "deleted_at": {"$exists": False},
             }
         )
     )
@@ -557,18 +625,19 @@ def get_ticket_details(current_user: dict = Depends(get_current_user), ticket_id
     ticket = ticket_collection.find_one(
         {"_id": _parse_object_id(ticket_id, "ticket_id")}
     )
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     membership = require_ticket_membership(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     ticket["_id"] = str(ticket["_id"])
     comment_query = {"ticket_id": ticket_id}
-    if membership.get("role") == ProjectRole.REPORTER.value:
+    if not has_capability(membership, Capability.VIEW_INTERNAL_COMMENTS):
         comment_query["visibility"] = "public"
     comments = list(comments_collection.find(comment_query))
     for comment in comments:
@@ -590,6 +659,7 @@ def subscribe_to_ticket(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     watcher_id = str(_parse_object_id(current_user.get("_id"), "user_id"))
     ticket_collection.update_one(
@@ -628,6 +698,7 @@ def unsubscribe_from_ticket(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     watcher_id = str(_parse_object_id(current_user.get("_id"), "user_id"))
     ticket_collection.update_one(
@@ -666,6 +737,7 @@ def get_ticket_transitions(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     _, project = _get_ticket_project(ticket)
     transitions = []
@@ -693,7 +765,47 @@ def get_ticket_transitions(
     return {"transitions": transitions}
 
 
-@router.post("/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])
+@router.get("/tickets/{ticket_id}/capabilities", tags=["Tickets"])
+def get_ticket_capabilities(
+    ticket_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return effective and ticket-contextual capabilities for the current user."""
+    _, ticket = _get_ticket_or_404(ticket_id)
+    project_object_id, _ = _get_ticket_project(ticket)
+    membership = require_project_membership(
+        project_object_id,
+        current_user,
+        project_members_collection,
+        allow_super_admin=True,
+        capability=Capability.VIEW_TICKET,
+    )
+
+    capabilities = set(serialize_capabilities(membership))
+    can_upload = can_upload_attachment(ticket, current_user, membership)
+    if can_upload:
+        capabilities.add(Capability.UPLOAD_ATTACHMENTS.value)
+
+    capability_values = sorted(capabilities)
+    user_id = str(current_user.get("_id"))
+    return {
+        "ticket_id": str(ticket["_id"]),
+        "project_id": str(project_object_id),
+        "role": membership.get("role"),
+        "capabilities": capability_values,
+        "can": {
+            capability.value: capability.value in capabilities
+            for capability in Capability
+        },
+        "context": {
+            "is_creator": user_id == str(ticket.get("userId")),
+            "is_assignee": user_id == str(ticket.get("assigned_agent")),
+            "can_upload_attachments": can_upload,
+        },
+    }
+
+
+@router.post("/tickets/{ticket_id}/transitions/{transition_id}", tags=["Tickets"])
 def transition_ticket(
     ticket_id: str,
     transition_id: str,
@@ -717,7 +829,7 @@ def create_ticket_link(
         from_ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.LINK_TICKETS,
         role_detail="Only project leads or members can link tickets",
     )
 
@@ -725,14 +837,12 @@ def create_ticket_link(
     if to_ticket_object_id == from_ticket_object_id:
         raise HTTPException(status_code=400, detail="A ticket cannot link to itself")
 
-    to_ticket = ticket_collection.find_one({"_id": to_ticket_object_id})
-    if not to_ticket:
-        raise HTTPException(status_code=404, detail="Target ticket not found")
+    _, to_ticket = _get_ticket_or_404(payload.to_ticket_id)
     require_ticket_membership(
         to_ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.LINK_TICKETS,
         role_detail="Only project leads or members can link tickets",
     )
 
@@ -811,6 +921,7 @@ def get_ticket_links(
         ticket,
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
 
     canonical_ticket_id = str(ticket_object_id)
@@ -829,23 +940,42 @@ def get_ticket_links(
 def update_ticket(
     ticket_id: str, data: TicketUpdate, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}
-    )
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
 
     require_ticket_membership(
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.UPDATE_TICKET,
         role_detail="Only project leads or members can update tickets",
     )
 
     update_data = data.model_dump(exclude_none=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No ticket fields supplied")
+
+    if "components" in update_data:
+        update_data["component_ids"] = _validate_component_ids(
+            _parse_object_id(ticket["project_id"], "project_id"),
+            update_data.pop("components"),
+        )
+
+    if "parent_id" in update_data:
+        if ticket.get("issue_type") != IssueType.SUBTASK.value:
+            raise HTTPException(
+                status_code=400,
+                detail="Only subtasks can have a parent issue",
+            )
+        parent_object_id = _parse_object_id(update_data["parent_id"], "parent_id")
+        parent = ticket_collection.find_one({"_id": parent_object_id})
+        if not parent or parent.get("deleted_at") is not None:
+            raise HTTPException(status_code=404, detail="Parent issue not found")
+        if str(parent.get("project_id")) != str(ticket.get("project_id")):
+            raise HTTPException(
+                status_code=400,
+                detail="Parent issue must belong to the same project as the subtask",
+            )
+        update_data["parent_id"] = str(parent_object_id)
 
     if "story_points" in update_data and ticket.get("sprint_id"):
         sprint = sprints_collection.find_one(
@@ -868,9 +998,7 @@ def update_ticket(
     ]
     update_data["updated_by"] = str(current_user["_id"])
     update_data["updated_at"] = datetime.now(timezone.utc)
-    ticket_collection.update_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}, {"$set": update_data}
-    )
+    ticket_collection.update_one({"_id": ticket_object_id}, {"$set": update_data})
 
     create_notification(
         project_id=ticket.get("project_id"),
@@ -903,17 +1031,13 @@ def update_ticket(
 def assign_ticket(
     ticket_id: str, data: AssignAgent, current_user: dict = Depends(get_current_user)
 ):
-    ticket = ticket_collection.find_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")}
-    )
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket_object_id, ticket = _get_ticket_or_404(ticket_id)
 
     actor_membership = require_ticket_membership(
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_WORK_ROLES,
+        capability=Capability.ASSIGN_TICKETS,
         role_detail="Only project leads or members can assign tickets",
     )
 
@@ -927,27 +1051,27 @@ def assign_ticket(
         agent_object_id,
         project_members_collection,
     )
-    if not target_membership or target_membership.get("role") not in PROJECT_WORK_ROLES:
+    if not target_membership or not has_capability(
+        target_membership, Capability.ASSIGN_TICKETS
+    ):
         raise HTTPException(
             status_code=400,
             detail="Target user must be a lead or member of this project",
         )
 
-    current_user_id = str(current_user["_id"])
-    is_lead = actor_membership.get("role") == ProjectRole.LEAD.value
-    is_self_assign = current_user_id == str(agent_object_id)
-    is_reassigning_another_member = ticket.get("assigned_agent") not in (
-        None,
-        current_user_id,
-    )
-    if not is_lead and (not is_self_assign or is_reassigning_another_member):
+    if not can_assign_ticket(
+        ticket,
+        current_user,
+        actor_membership,
+        agent_object_id,
+    ):
         raise HTTPException(
             status_code=403,
             detail="Project members can only self-assign unassigned tickets",
         )
 
     ticket_collection.update_one(
-        {"_id": _parse_object_id(ticket_id, "ticket_id")},
+        {"_id": ticket_object_id},
         {
             "$set": {
                 "assigned_agent": data.agent_id,
@@ -1064,14 +1188,35 @@ def _build_ticket_list_query(
     assigned_agent: Optional[str],
     search: Optional[str],
     overdue_only: Optional[bool],
+    components: Optional[List[str]] = None,
 ) -> dict:
     if len(project_ids) == 1:
-        query = {"project_id": project_ids[0]}
+        query = {"project_id": project_ids[0], "deleted_at": {"$exists": False}}
     else:
-        query = {"project_id": {"$in": project_ids}}
+        query = {
+            "project_id": {"$in": project_ids},
+            "deleted_at": {"$exists": False},
+        }
 
     if status:
-        query["status"] = status.lower()
+        status_value = status.strip()
+        if ObjectId.is_valid(status_value):
+            query["current_status_id"] = str(ObjectId(status_value))
+        else:
+            status_record = statuses_collection.find_one(
+                {
+                    "name": {
+                        "$regex": re.compile(
+                            f"^{re.escape(status_value)}$", re.IGNORECASE
+                        )
+                    }
+                }
+            )
+            if status_record:
+                query["current_status_id"] = str(status_record["_id"])
+            else:
+                # Unknown names must not match tickets accidentally.
+                query["current_status_id"] = status_value
     if priority:
         query["priority"] = priority.lower()
     if category:
@@ -1083,17 +1228,25 @@ def _build_ticket_list_query(
             query["issue_type"] = issue_type.value
     if labels:
         query["labels"] = {"$all": list(dict.fromkeys(labels))}
+    if components:
+        component_ids = [
+            _parse_object_id(component_id, "component_id")
+            for component_id in dict.fromkeys(components)
+        ]
+        query["component_ids"] = {"$all": component_ids}
     if epic_id:
         query["epic_id"] = str(_parse_object_id(epic_id, "epic_id"))
     if assigned_agent:
         query["assigned_agent"] = assigned_agent
     if overdue_only:
-        query["$expr"] = {
-            "$and": [
-                {"$lt": ["$due_date", datetime.now(timezone.utc)]},
-                {"$nin": ["$current_status_name", ["resolved", "closed"]]},
-            ]
-        }
+        query["due_date"] = {"$lt": datetime.now(timezone.utc)}
+        query.setdefault("$and", []).append(
+            {
+                "current_status_id": {
+                    "$nin": _status_ids_for_categories({"resolved", "closed", "done"})
+                }
+            }
+        )
     if search:
         search_regex = re.compile(re.escape(search), re.IGNORECASE)
         query["$or"] = [
@@ -1130,10 +1283,12 @@ def _paginate_ticket_query(
     tickets = []
     now = datetime.now(timezone.utc)
     for ticket in cursor:
-        if ticket.get("due_date") and ticket.get("current_status_name") not in [
+        status_category = _status_category_for_ticket(ticket)
+        if ticket.get("due_date") and status_category not in {
             "resolved",
             "closed",
-        ]:
+            "done",
+        }:
             ticket["is_overdue"] = _as_aware_utc(ticket["due_date"]) < now
         else:
             ticket["is_overdue"] = False
@@ -1163,6 +1318,7 @@ def _ticket_filters_applied(
     overdue_only: Optional[bool],
     sort_by: Optional[str],
     sort_order: Optional[str],
+    components: Optional[List[str]] = None,
 ) -> dict:
     return {
         "status": status,
@@ -1170,6 +1326,7 @@ def _ticket_filters_applied(
         "category": category,
         "issue_type": issue_type.value if issue_type else None,
         "labels": labels,
+        "components": components,
         "epic_id": epic_id,
         "assigned_agent": assigned_agent,
         "search": search,
@@ -1184,7 +1341,8 @@ def search_tickets(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
     status: Optional[str] = Query(
-        None, description="Filter by status (e.g. open, closed, pending)"
+        None,
+        description="Filter by status name or status ID (e.g. To Do or <status-id>)",
     ),
     priority: Optional[str] = Query(
         None, description="Filter by priority (e.g. low, medium, high)"
@@ -1197,6 +1355,14 @@ def search_tickets(
     labels: Annotated[
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
+    ] = None,
+    components: Annotated[
+        Optional[List[str]],
+        Query(
+            description=(
+                "Filter by all supplied components; repeat for multiple components"
+            )
+        ),
     ] = None,
     epic_id: Annotated[
         Optional[str],
@@ -1235,6 +1401,7 @@ def search_tickets(
         category=category,
         issue_type=issue_type,
         labels=labels,
+        components=components,
         epic_id=epic_id,
         assigned_agent=assigned_agent,
         search=search,
@@ -1273,7 +1440,8 @@ def get_tickets(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Results per page"),
     status: Optional[str] = Query(
-        None, description="Filter by status (e.g. open, closed, pending)"
+        None,
+        description="Filter by status name or status ID (e.g. To Do or <status-id>)",
     ),
     priority: Optional[str] = Query(
         None, description="Filter by priority (e.g. low, medium, high)"
@@ -1286,6 +1454,14 @@ def get_tickets(
     labels: Annotated[
         Optional[List[str]],
         Query(description="Filter by all supplied labels; repeat for multiple labels"),
+    ] = None,
+    components: Annotated[
+        Optional[List[str]],
+        Query(
+            description=(
+                "Filter by all supplied components; repeat for multiple components"
+            )
+        ),
     ] = None,
     epic_id: Annotated[
         Optional[str],
@@ -1313,13 +1489,14 @@ def get_tickets(
     current_user: dict = Depends(get_current_user),
 ):
     project = projects_collection.find_one({"code": project_key})
-    if not project:
+    if not project or project.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Project not found")
 
     require_project_membership(
         project["_id"],
         current_user,
         project_members_collection,
+        capability=Capability.VIEW_TICKET,
     )
     query = _build_ticket_list_query(
         project_ids=[str(project["_id"])],
@@ -1328,6 +1505,7 @@ def get_tickets(
         category=category,
         issue_type=issue_type,
         labels=labels,
+        components=components,
         epic_id=epic_id,
         assigned_agent=assigned_agent,
         search=search,
@@ -1377,6 +1555,7 @@ def get_tickets_summary(
             current_user,
             project_members_collection,
             allow_super_admin=True,
+            capability=Capability.VIEW_TICKET,
         )
         project_ids = [str(project_object_id)]
     else:
@@ -1388,52 +1567,70 @@ def get_tickets_summary(
     if not project_ids:
         return {}
 
-    query = {"project_id": {"$in": project_ids}}
+    query = {
+        "project_id": {"$in": project_ids},
+        "deleted_at": {"$exists": False},
+    }
 
     pipeline = [
         {"$match": query},
         {
+            "$lookup": {
+                "from": "statuses",
+                "localField": "current_status_id",
+                "foreignField": "_id",
+                "as": "status",
+            }
+        },
+        {"$unwind": {"path": "$status", "preserveNullAndEmptyArrays": True}},
+        {
             "$group": {
                 "_id": None,
                 "total_tickets": {"$sum": 1},
-                "to_do_tickets": {
+                "open_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "open"]}, 1, 0]}
+                },
+                "in_progress_tickets": {
                     "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "to_do"]}, 1, 0]
+                        "$cond": [
+                            {"$eq": ["$status.category", "in_progress"]},
+                            1,
+                            0,
+                        ]
                     }
+                },
+                "on_hold_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "on_hold"]}, 1, 0]}
+                },
+                "resolved_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.category", "resolved"]}, 1, 0]}
+                },
+                "to_do_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "to_do"]}, 1, 0]}
                 },
                 "in_development_tickets": {
                     "$sum": {
                         "$cond": [
-                            {"$eq": ["$current_status_name", "in_development"]},
+                            {"$eq": ["$status.key", "in_development"]},
                             1,
                             0,
                         ]
                     }
                 },
                 "in_qa_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "in_qa"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "in_qa"]}, 1, 0]}
                 },
                 "qa_passed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "qa_passed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "qa_passed"]}, 1, 0]}
                 },
                 "deployed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "deployed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "deployed"]}, 1, 0]}
                 },
                 "closed_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "closed"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "closed"]}, 1, 0]}
                 },
                 "reopened_tickets": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$current_status_name", "reopened"]}, 1, 0]
-                    }
+                    "$sum": {"$cond": [{"$eq": ["$status.key", "reopened"]}, 1, 0]}
                 },
                 "high_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "high"]}, 1, 0]}
@@ -1446,6 +1643,44 @@ def get_tickets_summary(
                 },
                 "urgent_priority_tickets": {
                     "$sum": {"$cond": [{"$eq": ["$priority", "urgent"]}, 1, 0]}
+                },
+                "bug_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "bug"]}, 1, 0]}
+                },
+                "task_tickets": {
+                    "$sum": {
+                        "$cond": [{"$in": ["$issue_type", ["task", "subtask"]]}, 1, 0]
+                    }
+                },
+                "story_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "story"]}, 1, 0]}
+                },
+                "epic_tickets": {
+                    "$sum": {"$cond": [{"$eq": ["$issue_type", "epic"]}, 1, 0]}
+                },
+                "overdue_tickets": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    {"$ne": ["$due_date", None]},
+                                    {"$lt": ["$due_date", datetime.now(timezone.utc)]},
+                                    {
+                                        "$not": [
+                                            {
+                                                "$in": [
+                                                    "$status.category",
+                                                    ["resolved", "closed"],
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                ]
+                            },
+                            1,
+                            0,
+                        ]
+                    }
                 },
             }
         },
@@ -1460,14 +1695,14 @@ def get_tickets_summary(
 def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)):
     ticket_object_id = _parse_object_id(ticket_id, "ticket_id")
     ticket = ticket_collection.find_one({"_id": ticket_object_id})
-    if not ticket:
+    if not ticket or ticket.get("deleted_at") is not None:
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     require_ticket_membership(
         ticket,
         current_user,
         project_members_collection,
-        allowed_roles=PROJECT_LEAD_ROLES,
+        capability=Capability.DELETE_TICKETS,
         role_detail="Only project leads can delete tickets",
     )
 
@@ -1491,14 +1726,15 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
             }
         ],
     )
-    ticket_collection.delete_one({"_id": ticket_object_id})
-    issue_links_collection.delete_many(
+    ticket_collection.update_one(
+        {"_id": ticket_object_id},
         {
-            "$or": [
-                {"from_ticket_id": str(ticket_object_id)},
-                {"to_ticket_id": str(ticket_object_id)},
-            ]
-        }
+            "$set": {
+                "deleted_at": datetime.now(timezone.utc),
+                "deleted_by": str(current_user["_id"]),
+                "deletion_reason": "deleted_by_user",
+            }
+        },
     )
 
     create_notification(
@@ -1511,4 +1747,4 @@ def delete_ticket(ticket_id: str, current_user: dict = Depends(get_current_user)
         preferences_collection=notification_preferences_collection,
     )
 
-    return {"message": "Ticket deleted successfully"}
+    return {"message": "Ticket archived successfully"}

@@ -89,6 +89,46 @@ def test_board_search_matches_description_and_filters_by_epic(
     assert epic_result["filters_applied"]["epic_id"] == str(other_epic_id)
 
 
+def test_ticket_search_filters_by_current_status_id_for_name_or_id(
+    monkeypatch, fake_collection
+):
+    status_id = ObjectId()
+    monkeypatch.setattr(
+        ticket,
+        "statuses_collection",
+        fake_collection.__class__([{"_id": status_id, "name": "To Do"}]),
+    )
+
+    by_name = ticket._build_ticket_list_query(
+        project_ids=["project"],
+        status="to do",
+        priority=None,
+        category=None,
+        issue_type=None,
+        labels=None,
+        epic_id=None,
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+    )
+    by_id = ticket._build_ticket_list_query(
+        project_ids=["project"],
+        status=str(status_id),
+        priority=None,
+        category=None,
+        issue_type=None,
+        labels=None,
+        epic_id=None,
+        assigned_agent=None,
+        search=None,
+        overdue_only=None,
+    )
+
+    assert by_name["current_status_id"] == str(status_id)
+    assert by_id["current_status_id"] == str(status_id)
+    assert "status" not in by_name
+
+
 def test_global_search_only_returns_tickets_from_accessible_projects(
     monkeypatch,
     fake_collection,

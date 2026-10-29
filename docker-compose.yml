@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: .
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "7000:7000"
+      - "50051:50051"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set explicitly}
+      MONGO_URI: mongodb://${MONGO_ROOT_USERNAME:?MONGO_ROOT_USERNAME must be set}:${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}@mongo:27017/?authSource=admin
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-mydatabase}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      PASSWORD_RESET_EXPIRE_MINUTES: ${PASSWORD_RESET_EXPIRE_MINUTES:-15}
+      GRPC_HOST: ${GRPC_HOST:-0.0.0.0}
+      GRPC_PORT: ${GRPC_PORT:-50051}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      ATTACHMENT_STORAGE_BACKEND: ${ATTACHMENT_STORAGE_BACKEND:-local}
+      ATTACHMENT_LOCAL_DIR: /app/uploads/tickets
+    volumes:
+      - ticket_uploads:/app/uploads/tickets
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    # MongoDB 7.0.16 is pinned to keep rebuilds reproducible.
+    image: mongo:7.0.16
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?MONGO_ROOT_USERNAME must be set}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  ticket_uploads:
